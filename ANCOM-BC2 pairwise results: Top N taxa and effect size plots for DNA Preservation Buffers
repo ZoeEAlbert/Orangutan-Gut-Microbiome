@@ -1,0 +1,211 @@
+#Input:  ANCOMBC2_pairwise_results_long.csv
+#Output: PNGs + CSVs in working directory (Volcano, violin, bars)
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(ggplot2)
+  library(g)
+  library(tidyr)
+})
+
+#Settings
+pair_csv <- "ANCOMBC2_pairwise_results_long.csv"
+TOP_N    <- 10
+ALPHA_Q  <- 0.05
+
+#Make it look nice
+pretty_label <- function(suf) {
+  suf <- as.character(suf)
+  if (length(suf) != 1) stop("pretty_label() expects a single suffix string.")
+  if (suf == "bufferRNAlater") return("RNAlater vs EtOH")
+  if (suf == "bufferZymoShield") return("ZymoShield vs EtOH")
+  if (suf == "bufferZymoShield_bufferRNAlater") return("ZymoShield vs RNAlater")
+  suf %>%
+    str_replace_all("^buffer", "") %>%
+    str_replace_all("_", " ") %>%
+    str_squish()
+}
+
+sanitize_file <- function(x) {
+  x %>%
+    str_replace_all("[^A-Za-z0-9]+", "_") %>%
+    str_replace_all("_+", "_") %>%
+    str_replace_all("^_|_$", "")
+}
+
+#Taxon names to look nicer
+short_taxon <- function(x) {
+  x <- as.character(x)
+  vapply(x, function(one) {
+    bits <- str_split(one, ";", simplify = FALSE)[[1]]
+    bits <- str_trim(bits)
+    bits <- bits[bits != ""]
+
+    g <- bits[str_detect(bits, "g__")]
+    if (length(g) > 0) {
+      out <- str_remove(g[1], ".*g__")
+      out <- na_if(out, "")
+      if (!is.na(out)) return(out)
+    }
+
+    if (length(bits) == 0) return(one)
+    out <- bits[length(bits)]
+    out <- str_remove(out, "^[a-z]__")
+    out <- na_if(out, "")
+    ifelse(is.na(out), one, out)
+  }, character(1))
+}
+
+#Read data
+pair <- readr::read_csv(pair_csv, show_col_types = FALSE)
+stopifnot("taxon" %in% names(pair))
+
+q_cols   <- grep("^q_", names(pair), value = TRUE)
+lfc_cols <- grep("^lfc_", names(pair), value = TRUE)
+if (length(q_cols) == 0 || length(lfc_cols) == 0) {
+  stop("Could not find q_* or lfc_* columns in: ", pair_csv)
+}
+
+suffixes <- intersect(sub("^q_", "", q_cols), sub("^lfc_", "", lfc_cols))
+if (length(suffixes) == 0) stop("No matching q_/lfc_ column pairs found.")
+
+message("Found comparisons: ",
+        paste(vapply(suffixes, pretty_label, character(1)), collapse = " | "))
+
+#Significant counts barplot
+sig_counts <- tibble(
+  suffix     = suffixes,
+  comparison = vapply(suffixes, pretty_label, character(1)),
+  n_sig      = vapply(suffixes, function(suf) {
+    sum(pair[[paste0("q_", suf)]] < ALPHA_Q, na.rm = TRUE)
+  }, integer(1))
+)
+
+p_sig <- ggplot(sig_counts, aes(x = fct_reorder(comparison, n_sig), y = n_sig)) +
+  geom_col() +
+  coord_flip() +
+  theme_classic(base_size = 12) +
+  labs(x = "Comparison", y = paste0("# taxa with q < ", ALPHA_Q))
+
+ggsave("ANCOMBC2_sig_counts.png", p_sig, width = 7, height = 3.5, dpi = 300)
+
+#Top N taxa plots (3 plots) + 3 CSVs
+for (suf in suffixes) {
+
+  qcol   <- paste0("q_", suf)
+  lfccol <- paste0("lfc_", suf)
+  comp   <- pretty_label(suf)
+  comp_f <- sanitize_file(comp)
+
+  df <- pair %>%
+    transmute(
+      taxon = taxon,
+      q     = .data[[qcol]],
+      lfc   = .data[[lfccol]]
+    ) %>%
+    filter(!is.na(q), !is.na(lfc)) %>%
+    arrange(q) %>%
+    slice_head(n = TOP_N) %>%
+    mutate(
+      taxon_short = short_taxon(taxon),
+      taxon_short = make.unique(taxon_short, sep = " "),  # <- prevents label dropping
+      taxon_short = str_wrap(taxon_short, width = 28),
+      direction   = ifelse(lfc > 0, "Higher in first group", "Higher in reference"),
+      taxon_short = fct_reorder(taxon_short, lfc),
+      q_label     = paste0("q=", formatC(q, format = "g", digits = 3))
+    )
+
+  #Save table
+  write_csv(df, paste0("ANCOMBC2_top", TOP_N, "_", comp_f, ".csv"))
+
+  #Compute padding for label room
+  xr  <- range(df$lfc, na.rm = TRUE)
+  pad <- max(0.25, diff(xr) * 0.35)
+
+  p_top <- ggplot(df, aes(x = lfc, y = taxon_short, fill = direction)) +
+    geom_col(width = 0.8) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text(
+      aes(label = q_label),
+      hjust = ifelse(df$lfc >= 0, -0.05, 1.05),
+      size  = 3
+    ) +
+    coord_cartesian(xlim = c(xr[1] - pad, xr[2] + pad), clip = "off") +
+    theme_classic(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.margin = margin(10, 60, 10, 15)
+    ) +
+    labs(
+      title    = paste0("Top ", TOP_N, " taxa: ", comp),
+      subtitle = "Bars = log fold change (ANCOM-BC2). Labels = q-values.",
+      x = "Log Fold Change",
+      y = NULL
+    )
+
+  ggsave(paste0("ANCOMBC2_top", TOP_N, "_", comp_f, ".png"),
+         p_top, width = 8.5, height = 5.5, dpi = 300)
+}
+
+#Effect size violin across comparisons with color by significance
+long_lfc <- bind_rows(lapply(suffixes, function(suf) {
+  tibble(
+    taxon      = pair$taxon,
+    comparison = pretty_label(suf),
+    q          = pair[[paste0("q_", suf)]],
+    lfc        = pair[[paste0("lfc_", suf)]]
+  )
+})) %>%
+  filter(!is.na(q), !is.na(lfc)) %>%
+  mutate(sig = q < ALPHA_Q)
+
+p_violin <- ggplot(long_lfc, aes(x = comparison, y = lfc)) +
+  geom_violin() +
+  geom_jitter(aes(color = sig), width = 0.12, height = 0, size = 1.4) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top") +
+  labs(
+    title = "Effect size (log fold change) across comparisons",
+    x = "Comparison", y = "Log Fold Change",
+    color = paste0("q < ", ALPHA_Q)
+  )
+
+ggsave("ANCOMBC2_logFC_violin.png", p_violin, width = 9, height = 5, dpi = 300)
+
+#Volcano plots (one per comparison) 
+for (suf in suffixes) {
+
+  qcol   <- paste0("q_", suf)
+  lfccol <- paste0("lfc_", suf)
+  comp   <- pretty_label(suf)
+  comp_f <- sanitize_file(comp)
+
+  dfv <- pair %>%
+    transmute(
+      q   = .data[[qcol]],
+      lfc = .data[[lfccol]]
+    ) %>%
+    filter(!is.na(q), !is.na(lfc)) %>%
+    mutate(
+      neglog10q = -log10(pmax(q, 1e-300)),
+      sig = q < ALPHA_Q
+    )
+
+  p_vol <- ggplot(dfv, aes(x = lfc, y = neglog10q)) +
+    geom_point(aes(color = sig), size = 1.4) +
+    theme_classic(base_size = 12) +
+    theme(legend.position = "top") +
+    labs(
+      title = paste0("Volcano: ", comp),
+      x = "Log Fold Change",
+      y = "-log10(q)",
+      color = paste0("q < ", ALPHA_Q)
+    )
+
+  ggsave(paste0("ANCOMBC2_volcano_", comp_f, ".png"),
+         p_vol, width = 7.5, height = 5.5, dpi = 300)
+}
+message("DONE: sig-count plot + 3 top taxa plots/CSVs + violin + 3 volcano plots.")
+
