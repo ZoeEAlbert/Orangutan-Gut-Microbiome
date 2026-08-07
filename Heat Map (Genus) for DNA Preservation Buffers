@@ -1,0 +1,140 @@
+#Buffer comparison heatmap
+#Inputs: metadata_buffer_QIIME.tsv; taxa_L7_relabund.tsv
+#Output: genus_heatmap_by_buffer.png; Figure_Buffer_Genus_Heatmap.pdf
+rm(list = ls())
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(pheatmap)
+  library(RColorBrewer)
+})
+
+#Read metadata
+meta <- read.delim("metadata_buffer_QIIME.tsv",
+                   header = TRUE, sep = "\t", check.names = FALSE) %>%
+  rename(BarcodeID = `#SampleID`,
+         SampleID  = label)
+
+#Keep only needed columns; buffer order
+meta <- meta %>%
+  select(SampleID, buffer) %>%
+  mutate(buffer = factor(buffer, levels = c("Ethanol", "RNAlater", "ZymoShield")))
+
+cat("Metadata buffers:\n")
+print(table(meta$buffer, useNA = "ifany"))
+
+#BIOM -> TSV
+#Skip only the first comment line
+tax <- read.delim("taxa_L7_relabund.tsv",
+                  header = TRUE, sep = "\t", check.names = FALSE,
+                  skip = 1)
+
+colnames(tax)[1] <- "Taxon"
+
+cat("\nTax table dims (rows x cols):\n")
+print(dim(tax))
+
+#Long format
+tax_long <- tax %>%
+  pivot_longer(-Taxon, names_to = "SampleID", values_to = "abund")
+
+#Confirm overlap between taxa table sample IDs
+overlap_n <- length(intersect(unique(tax_long$SampleID), unique(meta$SampleID)))
+cat("\nSampleID overlap:", overlap_n, "\n")
+if (overlap_n == 0) stop("No matching SampleIDs between taxa table columns and metadata 'label' column.")
+#Filter out unassigned taxa and eukaryotes 
+tax_long <- tax_long %>%
+  filter(!grepl("Unassigned", Taxon, ignore.case = TRUE)) %>%
+  filter(!grepl("Eukaryota",  Taxon, ignore.case = TRUE))
+
+#Extract Genus
+tax_long <- tax_long %>%
+  mutate(
+    Family = ifelse(grepl("f__", Taxon),
+                    sub(".*f__([^; ]+).*", "\\1", Taxon),
+                    NA_character_),
+    Genus = ifelse(grepl("g__", Taxon),
+                   sub(".*g__([^; ]+).*", "\\1", Taxon),
+                   NA_character_),
+    Label = ifelse(!is.na(Genus) & Genus != "" & Genus != "__", Genus, Family),
+    Label = trimws(Label)
+  ) %>%
+  filter(!is.na(Label), Label != "", Label != "__", Label != "Unassigned")
+
+cat("\nUnique labels (Genus preferred, else Family):", dplyr::n_distinct(tax_long$Label), "\n")
+
+#Collapse to Label level per sample
+label_long <- tax_long %>%
+  group_by(Label, SampleID) %>%
+  summarize(abund = sum(abund, na.rm = TRUE), .groups = "drop")
+
+#Mean relative abundance per buffer
+buf_label <- label_long %>%
+  inner_join(meta, by = "SampleID") %>%
+  group_by(buffer, Label) %>%
+  summarize(mean_abund = mean(abund, na.rm = TRUE), .groups = "drop")
+
+if (nrow(buf_label) == 0) stop("No rows in buf_label; join failed or everything filtered out.")
+
+#Choose top N taxa labels overall
+topN <- 50
+
+top_taxa <- buf_label %>%
+  group_by(Label) %>%
+  summarize(overall = sum(mean_abund), .groups = "drop") %>%
+  arrange(desc(overall)) %>%
+  slice_head(n = topN) %>%
+  pull(Label)
+
+cat("Top taxa selected:", length(top_taxa), "\n")
+
+#Build matrix
+mat <- buf_label %>%
+  filter(Label %in% top_taxa) %>%
+  pivot_wider(names_from = buffer, values_from = mean_abund, values_fill = 0) %>%
+  column_to_rownames("Label") %>%
+  as.matrix()
+
+#Column order
+mat <- mat[, c("Ethanol", "RNAlater", "ZymoShield"), drop = FALSE]
+
+#Log10 transform
+mat_log <- log10(mat + 1e-6)
+
+cat("\nMatrix dims (taxa x buffers):\n")
+print(dim(mat_log))
+cat("First 10 row labels:\n")
+print(head(rownames(mat_log), 10))
+
+#Plotting settings
+cols <- colorRampPalette(rev(RColorBrewer::brewer.pal(11, "RdBu")))(100)
+
+#Save PNG
+png("genus_heatmap_by_buffer.png", width = 1800, height = 2200, res = 300)
+pheatmap(mat_log,
+         color = cols,
+         border_color = NA,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         main = pretty_title,
+         fontsize_row = 10,
+         fontsize_col = 14,
+         angle_col = 45)
+dev.off()
+
+#Save PDF
+pdf("Figure_Buffer_Genus_Heatmap.pdf", width = 7, height = 9)
+pheatmap(mat_log,
+         color = cols,
+         border_color = NA,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         main = pretty_title,
+         fontsize_row = 10,
+         fontsize_col = 14,
+         angle_col = 45)
+dev.off()
+
+cat("\nDone!\nWrote:\n  - genus_heatmap_by_buffer.png\n  - Figure_Buffer_Genus_Heatmap.pdf\n")
