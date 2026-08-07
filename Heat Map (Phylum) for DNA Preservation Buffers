@@ -1,0 +1,159 @@
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(pheatmap)
+  library(RColorBrewer)
+
+#Settings
+ "metadata_buffer_QIIME.tsv"
+TAX_FILE   <- "taxa_L7_relabund.tsv"
+TOPN_TOTAL <- 10
+OUT_PREFIX <- "heatmap_Phylum
+
+#Extra Phylum
+extract_phylum <- function(taxon_string) {
+  if (!grepl("p__", taxon_string, fixed = TRUE)) return(NA_character_)
+  sub(".*p__([^; ]+).*", "\\1", taxon_string)
+}
+
+#Read Metadata
+meta <- read.delim(META_FILE,
+                   header = TRUE,
+                   sep = "\t",
+                   check.names = FALSE) %>%
+  rename(BarcodeID = `#SampleID`,
+         SampleID  = label) %>%
+  select(SampleID, buffer) %>%
+  mutate(buffer = factor(buffer,
+                         levels = c("Ethanol",
+                                    "RNAlater",
+                                    "ZymoShield")))
+
+#Read taxa table
+tax <- read.delim(TAX_FILE,
+                  header = TRUE,
+                  sep = "\t",
+                  check.names = FALSE,
+                  skip = 1)
+
+colnames(tax)[1] <- "Taxon"
+#Format
+tax_long <- tax %>%
+  pivot_longer(-Taxon,
+               names_to = "SampleID",
+               values_to = "abund")
+
+#Check overlap
+overlap_n <- length(intersect(unique(tax_long$SampleID),
+                              unique(meta$SampleID)))
+cat("SampleID overlap:", overlap_n, "\n")
+if (overlap_n == 0) stop("No matching SampleIDs.")
+
+#Remove unassigned and Eukaryota
+dat <- tax_long %>%
+  filter(!grepl("Unassigned", Taxon, ignore.case = TRUE)) %>%
+  filter(!grepl("Eukaryota",  Taxon, ignore.case = TRUE)) %>%
+  mutate(
+    Phylum = vapply(Taxon, extract_phylum, character(1)),
+    Phylum = trimws(Phylum)
+  ) %>%
+  filter(!is.na(Phylum),
+         Phylum != "",
+         Phylum != "__")
+
+cat("Unique phyla:", n_distinct(dat$Phylum), "\n")
+
+#Collapse to Phylum per sample
+phy_long <- dat %>%
+  group_by(Phylum, SampleID) %>%
+  summarize(abund = sum(abund, na.rm = TRUE),
+            .groups = "drop")
+
+#Mean relative abundance per buffer
+buf_phy <- phy_long %>%
+  inner_join(meta, by = "SampleID") %>%
+  group_by(buffer, Phylum) %>%
+  summarize(mean_abund = mean(abund, na.rm = TRUE),
+            .groups = "drop")
+
+#Select top phyla overall
+top_phyla <- buf_phy %>%
+  group_by(Phylum) %>%
+  summarize(overall = sum(mean_abund),
+            .groups = "drop") %>%
+  arrange(desc(overall)) %>%
+  slice_head(n = TOPN_TOTAL) %>%
+  pull(Phylum)
+
+cat("Phyla selected:", length(top_phyla), "\n")
+
+#Build matrix
+mat <- buf_phy %>%
+  filter(Phylum %in% top_phyla) %>%
+  pivot_wider(names_from = buffer,
+              values_from = mean_abund,
+              values_fill = 0) %>%
+  column_to_rownames("Phylum") %>%
+  as.matrix()
+
+mat <- mat[, c("Ethanol",
+               "RNAlater",
+               "ZymoShield"),
+           drop = FALSE]
+
+#Log transform for visualization
+mat_log <- log10(mat + 1e-6)
+
+#Order rows by overall abundance
+row_order <- order(rowSums(mat), decreasing = TRUE)
+mat_log <- mat_log[row_order, , drop = FALSE]
+
+#Plot (NO dendrogram)
+cols <- colorRampPalette(
+  rev(brewer.pal(11, "RdBu"))
+)(100)
+
+title <- paste0("Top ", nrow(mat_log),
+                " Phyla by Buffer\n(mean relabundance; log10)")
+
+out_png <- paste0(OUT_PREFIX, "_TOP", TOPN_TOTAL, "_NO_tree.png")
+out_pdf <- paste0(OUT_PREFIX, "_TOP", TOPN_TOTAL, "_NO_tree.pdf")
+
+png(out_png,
+    width = 1800,
+    height = 1800,
+    res = 300)
+
+pheatmap(mat_log,
+         color = cols,
+         border_color = NA,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         main = title,
+         fontsize_row = 14,
+         fontsize_col = 16,
+         angle_col = 45)
+
+dev.off()
+
+pdf(out_pdf,
+    width = 7,
+    height = 7)
+
+pheatmap(mat_log,
+         color = cols,
+         border_color = NA,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         main = title,
+         fontsize_row = 14,
+         fontsize_col = 16,
+         angle_col = 45)
+
+dev.off()
+
+cat("Done.\nFiles written:\n",
+    "  ", out_png, "\n",
+    "  ", out_pdf, "\n", sep = "")
+
