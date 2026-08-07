@@ -1,0 +1,165 @@
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(pheatmap)
+  library(RColorBrewer)
+})
+
+#Settings
+META_FILE <- "metadata_buffer_QIIME.tsv"
+TAX_FILE  <- "taxa_L7_relabund.tsv"
+
+#Balance Firmicutes and Bacteriodites 
+TOPN_EACH <- 20
+
+#Output prefix
+OUT_PREFIX <- "heatmap_Firmicutes_Bacteroidota"
+
+extract_rank <- function(taxon_string, rank_prefix) {
+  if (!grepl(rank_prefix, taxon_string, fixed = TRUE)) return(NA_character_)
+  sub(paste0(".*", rank_prefix, "([^; ]+).*"), "\\1", taxon_string)
+}
+
+#Build and save heatmap
+#Rank_name: "family" / "genus" / "species"
+
+make_heatmap <- function(meta, tax_long, rank_name, rank_prefix,
+                         topN_each = 20, out_prefix = "heatmap") {
+
+  #Filter to Firmicutes + Bacteroidota; Drop unassigned and Eukaryota
+  dat <- tax_long %>%
+    filter(!grepl("Unassigned", Taxon, ignore.case = TRUE)) %>%
+    filter(!grepl("Eukaryota",  Taxon, ignore.case = TRUE)) %>%
+    filter(grepl("p__Firmicutes", Taxon) |
+           grepl("p__Bacteroidota", Taxon)) %>%
+    mutate(
+      Phylum = case_when(
+        grepl("p__Firmicutes", Taxon)   ~ "Firmicutes",
+        grepl("p__Bacteroidota", Taxon) ~ "Bacteroidota",
+        TRUE ~ NA_character_
+      ),
+      Label = vapply(Taxon, extract_rank, character(1), rank_prefix = rank_prefix),
+      Label = trimws(Label)
+    ) %>%
+    filter(!is.na(Label), Label != "", Label != "__")
+
+  if (nrow(dat) == 0) stop(paste0("No rows left after filtering for ", rank_name))
+
+  cat("\n=== ", toupper(rank_name), " LEVEL ===\n", sep = "")
+  cat("Unique labels (pre-collapse): ", n_distinct(dat$Label), "\n", sep = "")
+
+  #Collapse label per sample
+  label_long <- dat %>%
+    group_by(Phylum, Label, SampleID) %>%
+    summarize(abund = sum(abund, na.rm = TRUE), .groups = "drop")
+
+  #Mean relative abundance by buffer
+  buf_label <- label_long %>%
+    inner_join(meta, by = "SampleID") %>%
+    group_by(Phylum, buffer, Label) %>%
+    summarize(mean_abund = mean(abund, na.rm = TRUE), .groups = "drop")
+
+  if (nrow(buf_label) == 0) stop(paste0("No data after joining metadata for ", rank_name))
+
+  #Pick top taxa within each phylum
+  top_taxa <- buf_label %>%
+    group_by(Phylum, Label) %>%
+    summarize(overall = sum(mean_abund), .groups = "drop") %>%
+    group_by(Phylum) %>%
+    arrange(desc(overall), .by_group = TRUE) %>%
+    slice_head(n = topN_each) %>%
+    ungroup() %>%
+    pull(Label)
+
+  cat("Top taxa selected (total): ", length(top_taxa), "\n", sep = "")
+
+  #Make matrix (rows = taxa, columns = buffers)
+  mat <- buf_label %>%
+    filter(Label %in% top_taxa) %>%
+    mutate(Label = paste0(Phylum, " | ", Label)) %>%  
+    select(-Phylum) %>%
+    pivot_wider(names_from = buffer, values_from = mean_abund, values_fill = 0) %>%
+    column_to_rownames("Label") %>%
+    as.matrix()
+
+  #Column order
+  mat <- mat[, c("Ethanol", "RNAlater", "ZymoShield"), drop = FALSE]
+
+  #Log10 transform for visualization
+  mat_log <- log10(mat + 1e-6)
+
+  #Colors
+  cols <- colorRampPalette(rev(brewer.pal(11, "RdBu")))(100)
+
+  title <- paste0("Firmicutes & Bacteroidota (", rank_name, " level)\n",
+                  "Top ", nrow(mat_log), " taxa by buffer (mean relabund; log10)")
+
+  #Output names
+  out_png <- paste0(out_prefix, "_", rank_name, "_NO_tree.png")
+  out_pdf <- paste0(out_prefix, "_", rank_name, "_NO_tree.pdf")
+
+  #Plot
+  png(out_png, width = 1800, height = 2400, res = 300)
+  pheatmap(mat_log,
+           color = cols,
+           border_color = NA,
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           main = title,
+           fontsize_row = 10,
+           fontsize_col = 14,
+           angle_col = 45)
+  dev.off()
+
+  pdf(out_pdf, width = 8, height = 11)
+  pheatmap(mat_log,
+           color = cols,
+           border_color = NA,
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           main = title,
+           fontsize_row = 10,
+           fontsize_col = 14,
+           angle_col = 45)
+  dev.off()
+
+  cat("Wrote:\n  - ", out_png, "\n  - ", out_pdf, "\n", sep = "")
+
+  invisible(list(mat = mat, mat_log = mat_log,
+                 files = c(png = out_png, pdf = out_pdf)))
+}
+
+#Read inputs
+meta <- read.delim(META_FILE, header = TRUE, sep = "\t", check.names = FALSE) %>%
+  rename(BarcodeID = `#SampleID`,
+         SampleID  = label) %>%
+  select(SampleID, buffer) %>%
+  mutate(buffer = factor(buffer,
+                         levels = c("Ethanol", "RNAlater", "ZymoShield")))
+
+tax <- read.delim(TAX_FILE, header = TRUE, sep = "\t",
+                  check.names = FALSE, skip = 1)
+colnames(tax)[1] <- "Taxon"
+
+tax_long <- tax %>%
+  pivot_longer(-Taxon, names_to = "SampleID", values_to = "abund")
+
+#Check
+overlap_n <- length(intersect(unique(tax_long$SampleID), unique(meta$SampleID)))
+cat("SampleID overlap:", overlap_n, "\n")
+if (overlap_n == 0) stop("No matching SampleIDs between taxa table and metadata.")
+
+#Run at 3 levels
+res_family <- make_heatmap(meta, tax_long,
+                           rank_name = "family", rank_prefix = "f__",
+                           topN_each = TOPN_EACH,
+                           out_prefix = OUT_PREFIX)
+
+res_species <- make_heatmap(meta, tax_long,
+                            rank_name = "species", rank_prefix = "s__",
+                            topN_each = TOPN_EACH,
+                            out_prefix = OUT_PREFIX)
+
+cat("\nAll done.\n")
+
