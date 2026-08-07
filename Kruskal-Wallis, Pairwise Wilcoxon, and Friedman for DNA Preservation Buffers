@@ -1,0 +1,84 @@
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+
+#Inputs
+meta_path <- "metadata_buffer_QIIME.tsv"
+meta <- readr::read_tsv(meta_path, show_col_types = FALSE)
+
+if ("#SampleID" %in% names(meta)) meta <- dplyr::rename(meta, SampleID = `#SampleID`)
+
+#Metaadata must have correct column
+colnames(meta)
+stopifnot("buffer" %in% names(meta))
+stopifnot("prop_euk" %in% names(meta))   
+stopifnot("SampleID" %in% names(meta))
+
+df <- meta %>%
+  transmute(
+    SampleID,
+    buffer = factor(buffer),
+    prop_euk = as.numeric(prop_euk)
+  ) %>%
+  filter(!is.na(prop_euk), !is.na(buffer))
+
+#Table: Kruskal–Wallis
+kw <- kruskal.test(prop_euk ~ buffer, data = df)
+
+kw_row <- tibble(
+  Comparison = "All buffers (Overall)",
+  H_statistic = unname(kw$statistic),
+  p_value = kw$p.value,
+  q_value = NA_real_
+)
+
+Pairwise Wilcoxon
+pw <- pairwise.wilcox.test(df$prop_euk, df$buffer, p.adjust.method = "BH")
+
+#Convert pairwise matrix to long table
+pw_long <- as.data.frame(as.table(pw$p.value)) %>%
+  filter(!is.na(Freq)) %>%
+  transmute(
+    Comparison = paste(Var1, "vs.", Var2),
+    H_statistic = NA_real_,         
+    p_value = NA_real_,             pw$p.value
+    q_value = Freq
+  )
+
+#Raw p-values and BH q-values
+pw_raw <- pairwise.wilcox.test(df$prop_euk, df$buffer, p.adjust.method = "none")
+pw_raw_long <- as.data.frame(as.table(pw_raw$p.value)) %>%
+  filter(!is.na(Freq)) %>%
+  transmute(
+    Comparison = paste(Var1, "vs.", Var2),
+    p_value = Freq
+  ) %>%
+  mutate(q_value = p.adjust(p_value, method = "BH"))
+
+table2 <- bind_rows(
+  kw_row,
+  pw_raw_long %>% mutate(H_statistic = NA_real_) %>% select(Comparison, H_statistic, p_value, q_value)
+)
+
+print(table2)
+
+#Friedman test
+stopifnot("pair_id" %in% names(meta))  
+
+df2 <- meta %>%
+  transmute(
+    SampleID,
+    buffer = factor(buffer),
+    pair_id = factor(pair_id),
+    prop_euk = as.numeric(prop_euk)
+  ) %>%
+  filter(!is.na(prop_euk), !is.na(buffer), !is.na(pair_id))
+
+#Friedman wants one value per (pair_id, buffer).
+#Averaged triplicates
+df2_summarized <- df2 %>%
+  group_by(pair_id, buffer) %>%
+  summarise(prop_euk = mean(prop_euk), .groups = "drop")
+
+fried <- friedman.test(prop_euk ~ buffer | pair_id, data = df2_summarized)
+print(fried)
