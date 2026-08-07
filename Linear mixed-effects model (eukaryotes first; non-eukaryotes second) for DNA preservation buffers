@@ -1,0 +1,122 @@
+#In Bash
+set -euo pipefail
+
+#QIIME env (SCC-safe order)
+module purge
+module load miniconda
+conda activate qiime2-amplicon-2025.4
+hash -r
+
+cd /projectnb/pongogp/zealbert/qiime_fastqs
+
+#Eukaryota-only table
+qiime taxa filter-table \
+  --i-table table.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-include Eukaryota \
+  --o-filtered-table table-euk.qza
+#Relative frequency tables
+qiime feature-table relative-frequency \
+  --i-table table.qza \
+  --o-relative-frequency-table table-relfreq.qza
+
+qiime feature-table relative-frequency \
+  --i-table table-euk.qza \
+  --o-relative-frequency-table table-euk-relfreq.qza
+
+#Export
+qiime tools export \
+  --input-path table-relfreq.qza \
+  --output-path table_relfreq_export
+
+qiime tools export \
+  --input-path table-euk-relfreq.qza \
+  --output-path table_euk_relfreq_export
+
+#BIOM -> TSV
+biom convert \
+  -i table_relfreq_export/feature-table.biom \
+  -o table_relfreq_export/feature-table.tsv \
+  --to-tsv
+
+biom convert \
+  -i table_euk_relfreq_export/feature-table.biom \
+  -o table_euk_relfreq_export/feature-table.tsv \
+  --to-tsv
+
+echo "Done. TSVs are:"
+ls -lh table_relfreq_export/feature-table.tsv table_euk_relfreq_export/feature-table.tsv
+
+#Run
+bash 01_make_euk_tables.sh
+
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+
+#Paths needed
+all_path  <- "/projectnb/pongogp/zealbert/qiime_fastqs/table_relfreq_export/feature-table.tsv"
+euk_path  <- "/projectnb/pongogp/zealbert/qiime_fastqs/table_euk_relfreq_export/feature-table.tsv"
+meta_path <- "/projectnb/pongogp/zealbert/metadata_buffer_comparison_new.tsv"
+
+stopifnot(file.exists(all_path), file.exists(euk_path), file.exists(meta_path))
+
+#Read tables
+all_ft <- read_tsv(all_path, skip = 1, show_col_types = FALSE)
+euk_ft <- read_tsv(euk_path, skip = 1, show_col_types = FALSE)
+names(all_ft)[1] <- "Feature.ID"
+names(euk_ft)[1] <- "Feature.ID"
+
+#Compute fraction euk per sample
+euk_frac <- euk_ft %>%
+pivot_longer(-Feature.ID, names_to = "sample_id", values_to = "relfreq") %>%
+group_by(sample_id) %>%
+summarise(frac_euk = sum(relfreq), .groups = "drop")
+
+#Add samples with zero Eukaryotes back in
+all_sample_ids <- colnames(all_ft)[-1]
+euk_frac <- tibble(sample_id = all_sample_ids) %>%
+  left_join(euk_frac, by = "sample_id") %>%
+  mutate(frac_euk = replace_na(frac_euk, 0),
+         frac_non_euk = 1 - frac_euk)
+
+#Load metadata
+meta <- read_tsv(meta_path, show_col_types = FALSE)
+if ("biological_s" %in% names(meta) && !("biological_sample" %in% names(meta))) {
+  meta <- meta %>% rename(biological_sample = biological_s)
+}
+
+#Merge
+df <- euk_frac %>% left_join(meta, by = "sample_id")
+
+#Drop unnecessary rows (like “sample”)
+df <- df %>% filter(!is.na(buffer), !is.na(biological_sample))
+
+#Factors
+df$buffer <- relevel(factor(df$buffer), ref = "Ethanol")
+df$biological_sample <- factor(df$biological_sample)
+
+#Check that there are 3 buffers per biological sample
+print(df %>% count(biological_sample, buffer))
+
+#Linear Mixed Model
+model_non_euk <- lmer(frac_non_euk ~ buffer + (1 | biological_sample), data = df)
+
+#Buffer vs. buffer
+emm <- emmeans(model_non_euk, ~ buffer)
+ctr_sum <- summary(contrast(emm, method = "trt.vs.ctrl", ref = "Ethanol"))
+
+final_table <- ctr_sum %>%
+  as.data.frame() %>%
+  transmute(
+    Comparison = contrast,
+    `Estimate (β)` = estimate,
+    `Standard Error` = SE,
+    `p-value` = p.value
+  )
+
+print(final_table)
+write_tsv(final_table, "Table_non_euk_fraction_buffer_LMM.tsv")
+cat("Saved: Table_non_euk_fraction_buffer_LMM.tsv\n")
+
