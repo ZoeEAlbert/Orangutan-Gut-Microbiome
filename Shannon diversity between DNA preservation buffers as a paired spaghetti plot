@@ -1,0 +1,63 @@
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+  library(stringr)
+})
+
+#Inputs
+meta_file   <- "sample-metadata.tsv"        
+shannon_file <- "shannon_L6.tsv"           
+out_png     <- "Shannon_genus_level_by_buffer.png"
+
+#Read metadata
+meta <- readr::read_tsv(meta_file, show_col_types = FALSE, name_repair = "minimal") %>%
+  mutate(
+    `#SampleID` = str_trim(`#SampleID`),
+    buffer = str_trim(buffer),
+    triplicate_set = as.character(triplicate_set)
+  ) %>%
+  mutate(
+    buffer = factor(buffer, levels = c("Ethanol", "RNAlater", "ZymoShield"))
+  )
+
+#Read Shannon
+sh <- readr::read_tsv(shannon_file, show_col_types = FALSE, name_repair = "minimal") %>%
+  mutate(`#SampleID` = str_trim(`#SampleID`))
+
+shannon_col <- setdiff(names(sh), "#SampleID")
+if (length(shannon_col) != 1) {
+  stop("Could not uniquely identify Shannon column in shannon_file. Columns are: ",
+       paste(names(sh), collapse = ", "))
+}
+
+sh <- sh %>%
+  rename(Shannon = all_of(shannon_col)) %>%
+  mutate(Shannon = as.numeric(Shannon))
+
+#Merge and filter
+df <- meta %>%
+  inner_join(sh, by = "#SampleID") %>%
+  filter(!is.na(buffer), !is.na(triplicate_set), !is.na(Shannon))
+
+df_sum <- df %>%
+  group_by(triplicate_set, buffer) %>%
+  summarise(Shannon = mean(Shannon, na.rm = TRUE), .groups = "drop")
+
+#Plot
+p <- ggplot(df_sum, aes(x = buffer, y = Shannon, group = triplicate_set)) +
+  geom_line(color = "grey70", linewidth = 0.6, alpha = 0.9) +
+  geom_point(aes(color = buffer), size = 2.5, alpha = 0.9) +
+  theme_classic(base_size = 12) +
+  labs(
+    x = NULL,
+    y = "Shannon diversity (genus level)",
+    color = NULL
+  ) +
+  theme(
+    legend.position = "none"
+  )
+
+print(p)
+ggsave(out_png, p, width = 6.5, height = 4.5, dpi = 300)
+cat("Saved:", out_png, "\n")
