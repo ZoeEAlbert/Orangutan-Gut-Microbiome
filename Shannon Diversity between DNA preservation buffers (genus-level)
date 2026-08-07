@@ -1,0 +1,197 @@
+SuppressPackageStartupMessages({
+  library(readxl)
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(stringr)
+})
+
+#Files
+meta_file <- "/projectnb/pongogp/zealbert/metadata_buffer_comparison.xlsx"
+shannon_file <- "/projectnb/pongogp/zealbert/shannon_buffer_export2/alpha-diversity.tsv"
+
+#Read metadata
+meta <- read_excel(meta_file)
+
+#Build barcode IDs from Outer and inner
+meta2 <- meta %>%
+  transmute(
+    pair_id = as.character(group_id),
+    outer = as.integer(Outer),
+    inner = as.integer(Inner),
+    SampleID = str_trim(as.character(`sample-id`)),
+    buffer = str_trim(as.character(buffer)),
+    barcode_id = paste0(
+      "barcode_external",
+      sprintf("%02d", outer),
+      "_internal",
+      sprintf("%02d", inner)
+    )
+  )
+
+#Check metadata
+print(head(meta2))
+print(table(meta2$buffer, useNA = "ifany"))
+
+#Read Shannon export
+sh_raw <- read_tsv(shannon_file, show_col_types = FALSE, name_repair = "minimal")
+
+# Exported file should have 2 columns: 1) barcode id 2) Shannon
+print(names(sh_raw))
+print(head(sh_raw))
+
+#Rename to consistent names
+names(sh_raw) <- c("barcode_id", "shannon")
+
+sh <- sh_raw %>%
+  transmute(
+    barcode_id = str_trim(as.character(barcode_id)), shannon = as.numeric(shannon)
+  )
+
+#Merge metadata and Shannon
+df <- meta2 %>%
+  left_join(sh, by = "barcode_id") %>%
+  transmute(
+    SampleID = SampleID,
+    pair_id = pair_id,
+    buffer = factor(buffer, levels = c("Ethanol", "RNAlater", "ZymoShield")),
+    shannon = shannon
+  ) %>%
+  filter(!is.na(SampleID), !is.na(pair_id), !is.na(buffer), !is.na(shannon))
+
+#Check merged data
+print(head(df))
+print(table(df$buffer, useNA = "ifany"))
+
+#Average to biological sample / triplicate-set level
+df_sum <- df %>%
+  group_by(pair_id, buffer) %>%
+  summarise(shannon = mean(shannon, na.rm = TRUE), .groups = "drop")
+
+print(head(df_sum))
+print(nrow(df_sum))  
+
+#Wide format for paired comparisons
+wide <- df_sum %>%
+  pivot_wider(names_from = buffer, values_from = shannon)
+
+print(head(wide))
+
+#Keep only complete matched sets
+wide_complete <- wide %>%
+  filter(!is.na(Ethanol), !is.na(RNAlater), !is.na(ZymoShield))
+
+print(head(wide_complete))
+print(nrow(wide_complete))
+
+#Calculate within-sample deltas
+delta <- wide_complete %>%
+  transmute(
+    pair_id,
+    d_RNA_EtOH  = RNAlater - Ethanol,
+    d_Zymo_EtOH = ZymoShield - Ethanol,
+    d_Zymo_RNA  = ZymoShield - RNAlater
+  ) %>%
+  pivot_longer(
+    -pair_id,
+    names_to = "comparison",
+    values_to = "delta_shannon"
+  ) %>%
+  mutate(
+    comparison = factor(
+      comparison,
+      levels = c("d_RNA_EtOH", "d_Zymo_EtOH", "d_Zymo_RNA")
+    )
+  )
+
+print(head(delta))
+print(range(delta$delta_shannon, na.rm = TRUE))
+
+#Paired Wilcoxon signed-rank tests against 0
+stats <- delta %>%
+  group_by(comparison) %>%
+  summarise(
+    n = sum(!is.na(delta_shannon)),
+    median_delta = median(delta_shannon, na.rm = TRUE),
+    p_wilcox_vs0 = wilcox.test(delta_shannon, mu = 0, paired = FALSE, exact = FALSE)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    q_bh = p.adjust(p_wilcox_vs0, method = "BH"),
+    comparison_label = c(
+      "RNAlater vs Ethanol",
+      "ZymoShield vs Ethanol",
+      "ZymoShield vs RNAlater"
+    ),
+    p_label = paste0("p = ", formatC(p_wilcox_vs0, format = "f", digits = 3))
+  )
+
+cat("\nStats table:\n")
+print(stats)
+
+#Plot
+p <- ggplot(delta, aes(x = comparison, y = delta_shannon)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5, color = "black") +
+  geom_boxplot(
+    width = 0.55,
+    outlier.shape = NA,
+    fill = "white",
+    color = "black",
+    linewidth = 0.7
+  ) +
+  geom_jitter(
+    width = 0.10,
+    height = 0,
+    alpha = 0.9,
+    size = 2.0,
+color = "black"
+  ) +
+scale_x_discrete(labels = c(
+  d_RNA_EtOH = "RNAlater vs Ethanol",
+  d_Zymo_EtOH = "ZymoShield vs Ethanol",
+  d_Zymo_RNA = "ZymoShield vs RNAlater"
+  )) +
+  theme_bw(base_size = 11) +
+theme(
+  panel.grid.major = element_line(color = "grey85", linewidth = 0.4),
+  panel.grid.minor = element_line(color = "grey92", linewidth = 0.25),
+  axis.text.x = element_text(color = "black", size = 8),
+  axis.text.y = element_text(color = "black", size = 10),
+  axis.title.y = element_text(color = "black", size = 11),
+  axis.title.x = element_blank(),
+  panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7)
+  ) +
+  labs(
+    y = expression(Delta~Shannon~diversity)
+  )
+
+print(p)
+
+#Save plot
+ggsave(
+  "/projectnb/pongogp/zealbert/delta_shannon_boxplot_final.png",
+  plot = p,
+width = 5.6,
+  height = 3.6,
+  dpi = 300
+)
+
+#Paired stats
+stats <- delta %>%
+  group_by(comparison) %>%
+  summarise(
+    n = sum(!is.na(delta_shannon)),
+    median_delta = median(delta_shannon, na.rm = TRUE),
+    p_wilcox_vs0 = wilcox.test(delta_shannon, mu = 0, exact = FALSE)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(q_bh = p.adjust(p_wilcox_vs0, method = "BH"))
+
+print(stats)
+
+write_csv(stats, "/projectnb/pongogp/zealbert/delta_shannon_stats_final.csv")
+
+cat("Saved:\n")
+cat("- /projectnb/pongogp/zealbert/delta_shannon_boxplot_final.png\n")
+cat("- /projectnb/pongogp/zealbert/delta_shannon_stats_final.csv\n")
