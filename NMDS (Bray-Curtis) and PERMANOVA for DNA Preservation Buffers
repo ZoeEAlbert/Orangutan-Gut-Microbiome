@@ -1,0 +1,167 @@
+#Install Packages
+pkgs <- c("tidyverse","vegan","Matrix","biomformat")
+to_install <- pkgs[!pkgs %in% installed.packages()[, "Package"]]
+if (length(to_install) > 0) install.packages(to_install, repos="https://cloud.r-project.org")
+invisible(lapply(pkgs, library, character.only=TRUE))
+
+#Paths
+meta_path <- "metadata_buffer_QIIME.tsv"
+biom_path <- "buffer_export/feature-table.biom"
+
+#Read metadata
+meta <- readr::read_table(meta_path, col_names=TRUE, show_col_types=FALSE)
+if ("#SampleID" %in% names(meta)) meta <- dplyr::rename(meta, SampleID = `#SampleID`)
+
+#Ensure columns exist
+stopifnot("SampleID" %in% names(meta))
+stopifnot("buffer" %in% names(meta))
+
+meta <- meta %>% mutate(buffer = as.factor(buffer))
+
+cat("Metadata samples:", nrow(meta), "\n")
+cat("Buffers:", paste(levels(meta$buffer), collapse=", "), "\n")
+
+#Read BIOM
+bt <- biomformat::read_biom(biom_path)
+S <- biomformat::biom_data(bt)   # sparse dgCMatrix: features x samples
+
+#Keep only samples that exist in metadata
+samps <- intersect(colnames(S), meta$SampleID)
+S <- S[, samps, drop=FALSE]
+meta2 <- meta %>% filter(SampleID %in% samps)
+
+cat("Overlapping samples:", length(samps), "\n")
+cat("Features (raw):", nrow(S), "\n")
+
+#Filter rare features
+prev <- Matrix::rowSums(S > 0)
+
+#Keep features present in >=2 samples
+S <- S[prev >= 2, , drop=FALSE]
+S <- S[Matrix::rowSums(S) > 0, , drop=FALSE]
+
+cat("Features after filtering:", nrow(S), "\n")
+
+#Normalize to relative abundance
+col_tot <- Matrix::colSums(S)
+col_tot[col_tot == 0] <- 1
+S_rel <- t(t(S) / col_tot) 
+
+#Densify AFTER filtering
+M_rel <- t(as.matrix(S_rel)) 
+cat("Dense matrix:", nrow(M_rel), "x", ncol(M_rel), "\n")
+
+#Remove empty samples
+rs <- rowSums(M_rel)
+cat("Samples with zero total after filtering:", sum(rs == 0), "\n")
+keep <- rs > 0
+M_rel <- M_rel[keep, , drop=FALSE]
+meta2 <- meta2 %>% filter(SampleID %in% rownames(M_rel))
+
+cat("Samples after removing empties:", nrow(M_rel), "\n")
+
+#Bray-Curtis and NMDS
+cat("Computing Bray-Curtis...\n")
+bray <- vegan::vegdist(M_rel, method="bray")
+
+cat("Running NMDS...\n")
+set.seed(123)
+nmds <- vegan::metaMDS(bray, k=2, trymax=50, autotransform=FALSE, trace=1)
+cat("NMDS stress:", round(nmds$stress, 3), "\n")
+
+#Plot and save 
+scores_df <- as.data.frame(vegan::scores(nmds, display="sites"))
+scores_df$SampleID <- rownames(scores_df)
+
+plot_df <- meta2 %>%
+  select(SampleID, buffer) %>%
+  distinct() %>%
+  inner_join(scores_df, by="SampleID")
+
+p <- ggplot2::ggplot(plot_df, ggplot2::aes(NMDS1, NMDS2, color=buffer)) +
+  ggplot2::geom_point(size=3, alpha=0.9) +
+  ggplot2::stat_ellipse(type="t", level=0.68, linewidth=1) +
+  ggplot2::coord_equal() +
+  ggplot2::theme_classic(base_size=14) +
+  ggplot2::labs(title="NMDS (Bray–Curtis)", color="Buffer") +
+  ggplot2::annotate("text", x=Inf, y=Inf,
+                    label=paste0("Stress: ", round(nmds$stress, 3)),
+                    hjust=1.1, vjust=1.5)
+
+ggplot2::ggsave("NMDS_buffers_braycurtis.png", p, width=7, height=5, dpi=300)
+cat("Saved: NMDS_buffers_braycurtis.png\n")
+
+#PERMANOVA (adonis2)
+cat("\nRunning PERMANOVA (Bray–Curtis ~ buffer)...\n")
+set.seed(123)
+perm <- vegan::adonis2(bray ~ buffer, data = meta2, permutations = 999, by = "margin")
+print(perm)
+
+#Pairwise PERMANOVA
+cat("\nPairwise PERMANOVA (Bray–Curtis) with BH-adjusted p-values...\n")
+
+pairwise_permanova <- function(dist, group, permutations = 999, seed = 123) {
+  stopifnot(inherits(dist, "dist"))
+  group <- droplevels(as.factor(group))
+  levs <- levels(group)
+  combs <- combn(levs, 2, simplify = FALSE)
+
+  out <- lapply(combs, function(x) {
+    idx <- group %in% x
+    dsub <- as.dist(as.matrix(dist)[idx, idx])
+    gsub <- droplevels(group[idx])
+    set.seed(seed)
+    res <- vegan::adonis2(dsub ~ gsub, permutations = permutations)
+    data.frame(
+      comparison = paste(x, collapse = " vs "),
+      R2 = res$R2[1],
+      F = res$F[1],
+      p = res$`Pr(>F)`[1],
+      stringsAsFactors = FALSE
+    )
+  })
+
+  df <- dplyr::bind_rows(out)
+  df$q <- p.adjust(df$p, method = "BH")
+  df
+}
+
+pw <- pairwise_permanova(bray, meta2$buffer, permutations = 999)
+print(pw)
+
+#Save
+readr::write_csv(pw, "pairwise_PERMANOVA_buffers_braycurtis.csv")
+cat("Saved: pairwise_PERMANOVA_buffers_braycurtis.csv\n")
+
+#PERMDISP (dispersion check)
+cat("\nChecking dispersion (betadisper + permutation test)...\n")
+bd <- vegan::betadisper(bray, meta2$buffer)
+
+bd_anova <- anova(bd)                
+bd_perm  <- vegan::permutest(bd, permutations = 999)  
+
+print(bd_anova)
+print(bd_perm)
+
+#Plot dispersion (distance to centroid)
+disp_df <- data.frame(
+  SampleID = names(bd$distances),
+  buffer = meta2$buffer[match(names(bd$distances), meta2$SampleID)],
+  dist_to_centroid = bd$distances
+)
+
+p_disp <- ggplot2::ggplot(disp_df, ggplot2::aes(x = buffer, y = dist_to_centroid, color = buffer)) +
+  ggplot2::geom_boxplot(outlier.shape = NA) +
+  ggplot2::geom_jitter(width = 0.15, height = 0, alpha = 0.8, size = 2) +
+  ggplot2::theme_classic(base_size = 14) +
+  ggplot2::labs(title = "Dispersion by buffer (distance to centroid)",
+                x = "Buffer", y = "Distance to centroid") +
+  ggplot2::theme(legend.position = "none")
+
+ggplot2::ggsave("PERMDISP_buffers_braycurtis.png", p_disp, width=7, height=5, dpi=300)
+cat("Saved: PERMDISP_buffers_braycurtis.png\n")
+
+cat("\nDONE.\nOutputs:\n",
+    "- NMDS_buffers_braycurtis.png\n",
+    "- pairwise_PERMANOVA_buffers_braycurtis.csv\n",
+    "- PERMDISP_buffers_braycurtis.png\n")
