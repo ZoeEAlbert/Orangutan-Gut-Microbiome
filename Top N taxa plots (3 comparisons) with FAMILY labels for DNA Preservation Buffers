@@ -1,0 +1,212 @@
+ #Input:  ANCOMBC2_pairwise_results_long.csv
+#Output: 3 PNGs + 3 CSVs
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(ggplot2)
+  library(forcats)
+})
+
+#Settings
+pair_csv <- "ANCOMBC2_pairwise_results_long.csv"
+TOP_N    <- 10
+
+#Pretty comparison labels
+pretty_label <- function(suf) {
+  suf <- as.character(suf)
+  if (length(suf) != 1) stop("pretty_label() expects a single suffix string.")
+
+  if (suf == "bufferRNAlater") return("RNAlater vs EtOH")
+  if (suf == "bufferZymoShield") return("ZymoShield vs EtOH")
+  if (suf == "bufferZymoShield_bufferRNAlater") return("ZymoShield vs RNAlater")
+
+  suf %>%
+    str_replace_all("^buffer", "") %>%
+    str_replace_all("_", " ") %>%
+    str_squish()
+}
+
+#Safe file names
+sanitize_file <- function(x) {
+  x %>%
+    str_replace_all("[^A-Za-z0-9]+", "_") %>%
+    str_replace_all("_+", "_") %>%
+    str_replace_all("^_|_$", "")
+}
+
+#Extract family-level name
+short_taxon_family <- function(x) {
+  x <- as.character(x)
+
+  vapply(x, function(one) {
+    bits <- str_split(one, ";", simplify = FALSE)[[1]]
+    bits <- str_trim(bits)
+    bits <- bits[bits != ""]
+
+    fam <- bits[str_detect(bits, "f__")]
+    if (length(fam) > 0) {
+      out <- str_remove(fam[1], ".*f__")
+      out <- str_trim(out)
+      out <- str_replace_all(out, "^_+$", "")
+      if (!is.na(out) && out != "") return(out)
+    }
+
+    if (length(bits) == 0) return("Unclassified")
+
+    out <- bits[length(bits)]
+    out <- str_remove(out, "^[a-z]__")
+    out <- str_trim(out)
+    out <- str_replace_all(out, "^_+$", "")
+
+    if (is.na(out) || out == "") {
+      return("Unclassified")
+    } else {
+      return(out)
+    }
+  }, character(1))
+}
+
+#Read data
+pair <- read_csv(pair_csv, show_col_types = FALSE)
+stopifnot("taxon" %in% names(pair))
+
+q_cols   <- grep("^q_", names(pair), value = TRUE)
+lfc_cols <- grep("^lfc_", names(pair), value = TRUE)
+
+if (length(q_cols) == 0 || length(lfc_cols) == 0) {
+  stop("Could not find q_* or lfc_* columns in: ", pair_csv)
+}
+
+suffixes <- intersect(sub("^q_", "", q_cols), sub("^lfc_", "", lfc_cols))
+if (length(suffixes) == 0) stop("No matching q_/lfc_ column pairs found.")
+
+message("Found comparisons: ",
+        paste(vapply(suffixes, pretty_label, character(1)), collapse = " | "))
+
+for (suf in suffixes) {
+
+  qcol   <- paste0("q_", suf)
+  lfccol <- paste0("lfc_", suf)
+  comp   <- pretty_label(suf)
+  comp_f <- sanitize_file(comp)
+
+  df <- pair %>%
+    transmute(
+      taxon = taxon,
+      q     = .data[[qcol]],
+      lfc   = .data[[lfccol]]
+    ) %>%
+    filter(!is.na(q), !is.na(lfc)) %>%
+    arrange(q, desc(abs(lfc))) %>%
+    slice_head(n = TOP_N) %>%
+    mutate(
+      family_label = short_taxon_family(taxon),
+      family_label = str_trim(family_label),
+      family_label = str_replace_all(family_label, "^_+$", ""),
+      family_label = ifelse(is.na(family_label) | family_label == "", "Unclassified", family_label)
+    )
+
+  if (nrow(df) == 0) {
+    message("Skipping ", comp, ": no rows available.")
+    next
+  }
+
+  #Number repeated labels so Unclassified becomes Unclassified 1, Unclassified 2, etc.
+  df <- df %>%
+    group_by(family_label) %>%
+    mutate(label_n = row_number()) %>%
+    ungroup() %>%
+    mutate(
+      family_label = ifelse(
+        duplicated(family_label) | family_label %in% family_label[duplicated(family_label)],
+        paste(family_label, label_n),
+        family_label
+      ),
+      family_label = ifelse(
+        family_label == "Unclassified",
+        "Unclassified 1",
+        family_label
+      ),
+      family_label = str_wrap(family_label, width = 24),
+      direction = ifelse(lfc > 0, "Higher in first group", "Higher in reference"),
+      q_label = paste0("q=", formatC(q, format = "g", digits = 3))
+    )
+
+  #Reorder after final labels exist
+  df <- df %>%
+    mutate(family_label = fct_reorder(family_label, lfc))
+
+  #Save CSV used for plot
+  write_csv(df, paste0("ANCOMBC2_top", TOP_N, "_", comp_f, "_FAMILY.csv"))
+
+  #Dynamic x limits
+  min_lfc <- min(df$lfc, na.rm = TRUE)
+  max_lfc <- max(df$lfc, na.rm = TRUE)
+
+  if (all(df$lfc >= 0)) {
+    xlim_low  <- -0.15
+    xlim_high <- max_lfc + max(0.20, abs(max_lfc) * 0.25)
+  } else if (all(df$lfc <= 0)) {
+    xlim_low  <- min_lfc - max(0.20, abs(min_lfc) * 0.25)
+    xlim_high <- 0.15
+  } else {
+    spread <- max_lfc - min_lfc
+    pad <- max(0.20, spread * 0.20)
+    xlim_low  <- min_lfc - pad
+    xlim_high <- max_lfc + pad
+  }
+
+  x_span <- xlim_high - xlim_low
+
+  df <- df %>%
+    mutate(
+      q_x = ifelse(lfc >= 0, lfc + 0.015 * x_span, lfc - 0.015 * x_span),
+      q_hjust = ifelse(lfc >= 0, 0, 1)
+    )
+
+  p_top <- ggplot(df, aes(x = lfc, y = family_label, fill = direction)) +
+    geom_col(width = 0.82, show.legend = FALSE) +
+    geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.5, color = "black") +
+    geom_text(
+      aes(x = q_x, label = q_label, hjust = q_hjust),
+      size = 3,
+      color = "black"
+    ) +
+    scale_y_discrete(expand = expansion(mult = c(0.15, 0.15))) +
+    coord_cartesian(
+      xlim = c(xlim_low, xlim_high),
+      clip = "off"
+    ) +
+    scale_fill_manual(values = c(
+      "Higher in first group" = "#F8766D",
+      "Higher in reference"   = "#00BFC4"
+    )) +
+    labs(
+      title = paste0("Top families: ", comp),
+      x = "Log Fold Change",
+      y = NULL
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title   = element_text(size = 13, face = "bold", color = "black", hjust = 0.5),
+      axis.text.y  = element_text(size = 10, color = "black"),
+      axis.text.x  = element_text(size = 10, color = "black"),
+      axis.title.x = element_text(size = 11, color = "black"),
+      axis.line    = element_line(color = "black"),
+      axis.ticks   = element_line(color = "black"),
+      plot.margin  = margin(12, 60, 12, 12)
+    )
+
+  ggsave(
+    filename = paste0("ANCOMBC2_top", TOP_N, "_", comp_f, "_FAMILY.png"),
+    plot     = p_top,
+    width    = 7.8,
+    height   = 5.2,
+    dpi      = 300,
+    bg       = "white"
+  )
+}
+
+message("DONE: 3 cleaned ANCOMBC2 family plots + CSVs saved.")  
