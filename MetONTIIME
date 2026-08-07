@@ -1,0 +1,98 @@
+#Prior to all bioinformatic analysis, samples needed to be separated into taxa with the program MetONTIIME.
+#!/bin/bash -l
+
+#$ -P pongogp
+#$ -N demux_08 #Run each individual outer barcode
+#$ -j y
+#$ -l mem_per_core=8G
+#$ -l h_rt=36:00:00
+#$ -pe omp 8
+#$ -o /projectnb/pongogp/zealbert/qlog
+#$ -t 18
+
+LOG_FILE=${JOB_NAME}_${SGE_TASK_ID}_mt.log
+
+#Record task details at the start:
+echo "=========================================================="
+echo "Starting on : $(date)"
+start_time=$(date +%s)
+echo "Running on node : $(hostname)"
+echo "Job submission directory : $(pwd)"
+echo "Current job ID : $JOB_ID"
+echo "Current job name : $JOB_NAME"
+if [[ -n "${SGE_TASK_LAST}" ]]; then
+    echo "Total task number : $SGE_TASK_LAST"
+    echo "Task index number : $SGE_TASK_ID"
+fi
+echo "=========================================================="
+
+#Load the module and anything other required modules 
+module purge
+module load java/21.0.4
+module load nextflow/24.04.4
+module load metontiime/2.1.0
+
+ROOT_DIR=/projectnb/vervmb/member/zealbert
+QSUB_DIR="$ROOT_DIR/qsub"
+CONFIG_TEMPLATE="${QSUB_DIR}/test.conf.temp"
+SAMPLE_DATA_DIR=/projectnb/pongogp/microbiome202509/demux_08
+SAMPLE_NAME=$(printf "barcode_external08_internal%02d" $SGE_TASK_ID)
+echo "barcode to process:$SAMPLE_NAME"
+
+if [ ! -d  ${SAMPLE_DATA_DIR}/${SAMPLE_NAME} ]
+then
+    echo "$SAMPLE_NAME is not available, skipping ..."
+    echo "$JOB_NAME $JOB_ID:$SGE_TASK_ID skipped!"
+    exit
+fi
+
+cd $SAMPLE_DATA_DIR
+
+WORK_DIR="/projectnb/pongogp/zealbert/${JOB_NAME}/${SAMPLE_NAME}_${JOB_ID}"
+BARCODE_DIR=$WORK_DIR/fastq #use a dedicated subdirectory for barcode data
+mkdir -p $BARCODE_DIR
+cd $BARCODE_DIR
+ln -s ${SAMPLE_DATA_DIR}/${SAMPLE_NAME}
+echo "BARCODE_DIR=$BARCODE_DIR"
+
+echo "---------------"
+echo "working directory: $WORK_DIR"
+echo "---------------"
+cd $WORK_DIR
+
+CONFIG_FILE=${WORK_DIR}/${SAMPLE_NAME}.conf
+cp $CONFIG_TEMPLATE $CONFIG_FILE
+SAMPLE_METADATA=${WORK_DIR}/${SAMPLE_NAME}.tsv
+echo "SAMPLE_METADATA=$SAMPLE_METADATA"
+RESULT_DIR=$WORK_DIR/resultDir_${SAMPLE_NAME}
+echo "RESULT_DIR=$RESULT_DIR"
+
+BARCODE_DIR_ESCAPED=$(printf '%s' "$BARCODE_DIR" | sed 's/\//\\\//g')
+echo $BARCODE_DIR_ESCAPED
+perl -pi -e "s/BARCODE_DIR/${BARCODE_DIR_ESCAPED}/g" $CONFIG_FILE
+SAMPLE_METADATA_ESCAPED=$(printf '%s' "$SAMPLE_METADATA" | sed 's/\//\\\//g')
+echo $SAMPLE_METADATA_ESCAPED
+perl -pi -e "s/SAMPLE_METADATA/${SAMPLE_METADATA_ESCAPED}/g" $CONFIG_FILE
+RESULT_DIR_ESCAPED=$(printf '%s' "$RESULT_DIR" | sed 's/\//\\\//g')
+echo $RESULT_DIR_ESCAPED
+perl -pi -e "s/RESULT_DIR/${RESULT_DIR_ESCAPED}/g" $CONFIG_FILE
+
+NXF_SINGULARITY_CACHEDIR=$ROOT_DIR/.singularity #fixed for all metontiime barcord run
+mkdir -p $NXF_SINGULARITY_CACHEDIR
+
+CMD="nextflow -c $CONFIG_FILE run $SCC_METONTIIME_DIR/bin/metontiime2.nf -profile singularity --resultsDir=$RESULT_DIR --assignTaxonomyHours=48 -resume &>> $LOG_FILE"
+echo "command to run: "
+echo $CMD
+eval $CMD
+
+#Record job end time: 
+echo "=========================================================="
+echo "Job ends on : $(date)"
+end_time=$(date +%s)
+DIFF=$(($end_time - $start_time))
+echo "Time Elasped $(($DIFF / 3600 )) hours $((($DIFF % 3600)/60)) minutes $(($DIFF % 60)) seconds"
+echo ""
+echo "$JOB_NAME $JOB_ID:$SGE_TASK_ID finished!"
+echo "=========================================================="
+
+cd $ROOT_DIR
