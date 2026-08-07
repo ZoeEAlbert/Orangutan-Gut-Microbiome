@@ -1,0 +1,16 @@
+#Prior to all analysis, samples needed to be demultiplexed using guppy 
+```{bash}
+DATADIR=/Users/smagl/Desktop/ZoeAlbert/data_all
+```
+Putting this in a loop that will:
+1. Make an output folder for the demux data.
+2. Call on the individual outer barcode to demux.
+3. Put that data into the output folder was just made.
+```{bash}
+for bc in {4..8};do # For the three outer barcodes used
+~/ont-guppy-cpu/bin/guppy_barcoder \
+-i ${DATADIR}/barcode0${bc}/ \
+-s ${DATADIR}/demux_0${bc} \
+--fastq_out --enable_trim_barcodes \
+--config configuration_dual.cfg;done
+```
