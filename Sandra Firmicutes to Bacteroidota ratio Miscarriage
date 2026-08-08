@@ -1,0 +1,235 @@
+cat > H3_FBratio_PanelA_B_clean.R <<'EOF'
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(ggplot2)
+  library(biomformat)
+})
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 4) {
+  stop("Usage: Rscript H3_FBratio_PanelA_B_clean.R <relfreq_biom> <taxonomy_tsv> <metadata_tsv> <out_prefix>")
+}
+
+biom_path  <- args[1]
+tax_path   <- args[2]
+meta_path  <- args[3]
+out_prefix <- args[4]
+
+meta_sample_col <- "#SampleID"
+meta_day_col    <- "pregnancy_day"
+
+b <- read_biom(biom_path)
+mat <- as.matrix(biom_data(b))
+
+rel <- as.data.frame(mat) %>%
+  tibble::rownames_to_column("FeatureID") %>%
+  pivot_longer(-FeatureID, names_to = "SampleID", values_to = "RelAbund")
+
+tax <- read_tsv(tax_path, show_col_types = FALSE)
+
+feat_candidates <- c("Feature ID", "FeatureID", "feature-id", "FeatureId", "OTU ID", "ASV ID")
+feat_col <- intersect(names(tax), feat_candidates)[1]
+if (is.na(feat_col)) feat_col <- names(tax)[1]
+
+tax_candidates <- c("Taxon", "taxon", "taxonomy", "Taxonomy")
+tax_col <- intersect(names(tax), tax_candidates)[1]
+if (is.na(tax_col)) {
+  if (ncol(tax) < 2) stop("taxonomy.tsv has <2 columns; cannot find taxonomy strings")
+  tax_col <- names(tax)[2]
+}
+
+tax2 <- tax %>%
+  rename(
+    FeatureID = all_of(feat_col),
+    Taxon     = all_of(tax_col)
+  ) %>%
+  mutate(
+    Phylum = str_match(Taxon, "p__([^;]+)")[, 2],
+    Phylum = ifelse(is.na(Phylum) | Phylum == "", NA_character_, Phylum)
+  ) %>%
+  select(FeatureID, Phylum)
+
+meta <- read_tsv(meta_path, show_col_types = FALSE)
+
+if (!meta_sample_col %in% names(meta)) stop(paste("Metadata missing:", meta_sample_col))
+if (!"Trimester" %in% names(meta)) stop("Metadata missing: Trimester")
+if (!meta_day_col %in% names(meta)) stop(paste("Metadata missing:", meta_day_col))
+
+meta2 <- meta %>%
+  rename(
+    SampleID     = all_of(meta_sample_col),
+    PregnancyDay = all_of(meta_day_col)
+  ) %>%
+  mutate(
+    PregnancyDay = as.numeric(PregnancyDay),
+    Stage = ifelse(Trimester == "New mom", "Postpartum", "Pregnancy"),
+    Stage = factor(Stage, levels = c("Pregnancy", "Postpartum"))
+  )
+
+phy <- rel %>%
+  left_join(tax2, by = "FeatureID") %>%
+  filter(!is.na(Phylum)) %>%
+  group_by(SampleID, Phylum) %>%
+  summarise(RelAbund = sum(RelAbund), .groups = "drop")
+
+firm <- phy %>%
+  filter(tolower(Phylum) %in% tolower(c("Firmicutes", "Bacillota"))) %>%
+  group_by(SampleID) %>%
+  summarise(Firmicutes = sum(RelAbund), .groups = "drop")
+
+bact <- phy %>%
+  filter(tolower(Phylum) %in% tolower(c("Bacteroidota", "Bacteroidetes"))) %>%
+  group_by(SampleID) %>%
+  summarise(Bacteroidota = sum(RelAbund), .groups = "drop")
+
+dat <- meta2 %>%
+  left_join(firm, by = "SampleID") %>%
+  left_join(bact, by = "SampleID") %>%
+  mutate(
+    Firmicutes   = ifelse(is.na(Firmicutes), 0, Firmicutes),
+    Bacteroidota = ifelse(is.na(Bacteroidota), 0, Bacteroidota),
+    FB_ratio     = (Firmicutes + 1e-6) / (Bacteroidota + 1e-6),
+    log10_FB     = log10(FB_ratio)
+  ) %>%
+  filter(!is.na(PregnancyDay)) %>%
+  arrange(PregnancyDay)
+
+max_preg <- suppressWarnings(max(dat$PregnancyDay[dat$Stage == "Pregnancy"], na.rm = TRUE))
+min_post <- suppressWarnings(min(dat$PregnancyDay[dat$Stage == "Postpartum"], na.rm = TRUE))
+birth_marker <- if (is.finite(max_preg) && is.finite(min_post)) {
+  (max_preg + min_post) / 2
+} else {
+  NA_real_
+}
+
+dat_preg <- dat %>% filter(Stage == "Pregnancy")
+
+lm_p <- NA_real_
+slope <- NA_real_
+
+if (nrow(dat_preg) >= 3) {
+  fit <- lm(log10_FB ~ PregnancyDay, data = dat_preg)
+  slope <- unname(coef(fit)[2])
+  lm_p  <- summary(fit)$coefficients["PregnancyDay", "Pr(>|t|)"]
+}
+
+wil <- wilcox.test(log10_FB ~ Stage, data = dat, exact = FALSE)
+
+clean_theme <- theme_classic(base_size = 16) +
+  theme(
+    text = element_text(color = "black"),
+    axis.text = element_text(color = "black", size = 14),
+    axis.title = element_text(color = "black", size = 16),
+    plot.title = element_text(color = "black", face = "bold", size = 18),
+    plot.subtitle = element_text(color = "black", size = 15),
+    legend.text = element_text(color = "black", size = 13),
+    legend.title = element_text(color = "black", size = 14)
+  )
+
+pA <- ggplot(dat, aes(x = PregnancyDay, y = log10_FB, shape = Stage)) +
+  geom_point(size = 3, color = "black") +
+  geom_smooth(
+    data = dat_preg,
+    aes(x = PregnancyDay, y = log10_FB),
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE,
+    color = "black",
+    fill = "grey75",
+    linewidth = 0.8,
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "A)",
+    subtitle = paste0("p = ", ifelse(is.na(lm_p), "NA", signif(lm_p, 3))),
+    x = "Pregnancy day",
+    y = "log10(Firmicutes / Bacteroidota)"
+  ) +
+  clean_theme
+
+if (is.finite(birth_marker)) {
+  y_top <- max(dat$log10_FB, na.rm = TRUE)
+  pA <- pA +
+    geom_vline(xintercept = birth_marker, linetype = "dashed", color = "black", linewidth = 0.6) +
+    annotate(
+      "text",
+      x = birth_marker,
+      y = y_top,
+      label = "Birth",
+      vjust = -0.5,
+      hjust = 0.5,
+      size = 5,
+      color = "black"
+    )
+}
+
+pB <- ggplot(dat, aes(x = Stage, y = log10_FB)) +
+  geom_boxplot(outlier.shape = NA, color = "black", linewidth = 0.8) +
+  geom_jitter(width = 0.10, size = 3, color = "black") +
+  labs(
+    title = "B)",
+    subtitle = paste0("p = ", signif(wil$p.value, 3)),
+    x = "",
+    y = "log10(Firmicutes / Bacteroidota)"
+  ) +
+  clean_theme
+
+out_png <- paste0(out_prefix, "_panelAB_clean.png")
+out_pdf <- paste0(out_prefix, "_panelAB_clean.pdf")
+
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  fig <- pA / pB + plot_layout(heights = c(1.05, 1))
+  ggsave(out_png, fig, width = 9, height = 8, dpi = 600, bg = "white")
+  ggsave(out_pdf, fig, width = 9, height = 8, bg = "white")
+} else {
+  ggsave(paste0(out_prefix, "_panelA_clean.png"), pA, width = 9, height = 4.5, dpi = 600, bg = "white")
+  ggsave(paste0(out_prefix, "_panelB_clean.png"), pB, width = 7, height = 4.5, dpi = 600, bg = "white")
+}
+
+write_csv(dat, paste0(out_prefix, "_data_clean.csv"))
+
+stats_out <- tibble::tibble(
+  pregnancy_slope = slope,
+  pregnancy_slope_p = lm_p,
+  wilcox_p = wil$p.value,
+  n_preg = sum(dat$Stage == "Pregnancy"),
+  n_post = sum(dat$Stage == "Postpartum")
+)
+
+write_csv(stats_out, paste0(out_prefix, "_stats_summary_clean.csv"))
+EOF
+
+#Everything was in bash, now run
+OUTDIR="sandra_preg_vs_postpartum"
+
+Rscript H3_FBratio_PanelA_B_clean.R \
+  "$OUTDIR/relfreq_export/feature-table.biom" \
+  "$OUTDIR/tax_export/taxonomy.tsv" \
+  "$OUTDIR/metadata_sandra_preg_post.tsv" \
+  "$OUTDIR/H3_Sandra_FBratio_PregVsPost"
+
+#Stats Linear model (pregnancy only)
+dat_preg <- dat %>% filter(Stage == "Pregnancy")
+
+fit <- lm(log10_FB ~ PregnancyDay, data = dat_preg)
+summary(fit)
+
+#Exact slope, p, R squared
+fit_sum <- summary(fit)
+
+slope <- coef(fit)[2]
+p_val <- fit_sum$coefficients["PregnancyDay", "Pr(>|t|)"]
+r2 <- fit_sum$r.squared
+
+slope
+p_val
+r2
+
+#Wilcoxon test- pregnancy vs. postpartum
+wilcox.test(log10_FB ~ Stage, data = dat, exact = FALSE)
