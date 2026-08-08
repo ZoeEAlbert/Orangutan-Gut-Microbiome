@@ -1,0 +1,118 @@
+ suppressPackageStartupMessages({
+  library(tidyverse)
+})
+
+#Paths
+META <- "/projectnb/pongogp/zealbert/metadata_pregnancy_bibiandsandra_withdates.tsv"
+SHAN <- "/projectnb/pongogp/zealbert/shannon_merged_outer_export/alpha-diversity.tsv"
+
+stopifnot(file.exists(META), file.exists(SHAN))
+
+#Read Metadata
+meta_df <- readr::read_tsv(META, show_col_types = FALSE) %>%
+  mutate(`#SampleID` = as.character(`#SampleID`))
+
+#Read Shannon
+shannon_raw <- readr::read_tsv(SHAN, show_col_types = FALSE)
+
+if ("#SampleID" %in% names(shannon_raw)) {
+  shannon_raw <- shannon_raw %>% rename(sample_id = `#SampleID`)
+} else {
+  shannon_raw <- shannon_raw %>% rename(sample_id = 1)
+}
+
+sh_col <- names(shannon_raw)[grepl("^shannon$|shannon", names(shannon_raw), ignore.case = TRUE)][1]
+stopifnot(!is.na(sh_col))
+
+shannon_df <- shannon_raw %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    Shannon   = as.numeric(.data[[sh_col]])
+  )
+
+#Merge
+dat <- shannon_df %>%
+  left_join(meta_df, by = c("sample_id" = "#SampleID")) %>%
+  filter(
+    pregnancy_status == "pregnant" |
+    pregnancy_status == "complication" |
+    Trimester == "Postpartum"
+  ) %>%
+  filter(!is.na(pregnancy_day)) %>%
+  mutate(
+    pregnancy_day = as.numeric(pregnancy_day),
+
+    phase = case_when(
+      Trimester == "New mom" ~ "Postpartum",
+      pregnancy_status == "complication" ~ "Complication",
+      pregnancy_status == "pregnant" ~ "Pregnant",
+      TRUE ~ NA_character_
+    ),
+    phase = factor(phase, levels = c("Pregnant", "Complication", "Postpartum (New mom)")),
+
+    stage = case_when(
+      Trimester == "First Trimester" ~ "First Trimester",
+      Trimester == "Second Trimester" ~ "Second Trimester",
+      Trimester == "Third Trimester" ~ "Third Trimester",
+      pregnancy_status == "complication" ~ "Complication",
+      Trimester == "New mom" ~ "Postpartum",
+      TRUE ~ NA_character_
+    ),
+    stage = factor(
+      stage,
+      levels = c("First Trimester", "Second Trimester", "Third Trimester", "Complication", "Postpartum")
+    ),
+
+    subject_label = recode(subject_id,
+                           "bibisu_01" = "Bibi",
+                           "sandrasu_01" = "Sandra"),
+    subject_label = factor(subject_label, levels = c("Bibi", "Sandra"))
+  )
+
+#Spearman trend stats by subject
+trend_stats <- dat %>%
+  group_by(subject_label) %>%
+  summarise(
+    n = n(),
+    rho = suppressWarnings(cor(pregnancy_day, Shannon, method = "spearman", use = "complete.obs")),
+    p_value = suppressWarnings(cor.test(pregnancy_day, Shannon, method = "spearman", exact = FALSE)$p.value),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_label = paste0("rho = ", round(rho, 2), ", p = ", signif(p_value, 3))
+  )
+
+print(trend_stats)
+readr::write_csv(trend_stats, OUT_STATS)
+
+#Plot
+p <- ggplot(dat, aes(x = pregnancy_day, y = Shannon, color = phase, shape = stage)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_smooth(data = dat %>% filter(phase == "Pregnant"),
+              method = "lm", se = TRUE) +
+  geom_smooth(data = dat %>% filter(phase != "Pregnant"),
+              method = "lm", se = FALSE) +
+  facet_wrap(~ subject_label, ncol = 1, scales = "free_x") +
+  scale_shape_manual(values = c(
+    "First Trimester"  = 17,
+    "Second Trimester" = 15,
+    "Third Trimester"  = 18,
+    "Complication"     = 4,
+    "Postpartum"          = 8
+  )) +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "Days since conception (day 0 = conception)",
+    y = "Shannon diversity",
+    color = "Phase",
+    shape = "Stage"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+ggsave("shannon_over_time_bibi_sandra_trimester_shapes.png",
+       p, width = 8, height = 8, dpi = 300)
+
+p
