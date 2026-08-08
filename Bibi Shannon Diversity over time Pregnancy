@@ -1,0 +1,146 @@
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+
+#Metadata 
+META <- "/projectnb/pongogp/zealbert/metadata_pregnancy_bibiandsandra_withdates.tsv"
+SHAN <- "/projectnb/pongogp/zealbert/shannon_merged_outer_export/alpha-diversity.tsv"
+
+OUT_PREFIX <- "Bibi_Shannon_over_time_WITHPRE_mis113_NO_SMOOTH"
+
+BIBI_ID <- "bibisu_01"
+MIS_DAY <- 112
+
+ADD_LM_TREND <- FALSE
+
+stopifnot(file.exists(META), file.exists(SHAN))
+
+#Read metadata
+meta_df <- readr::read_tsv(META, show_col_types = FALSE) %>%
+  mutate(`#SampleID` = as.character(`#SampleID`))
+
+#Read Shannon (QIIME)
+shannon_raw <- readr::read_tsv(SHAN, show_col_types = FALSE)
+
+if ("#SampleID" %in% names(shannon_raw)) {
+  shannon_raw <- shannon_raw %>% rename(sample_id = `#SampleID`)
+} else if ("SampleID" %in% names(shannon_raw)) {
+  shannon_raw <- shannon_raw %>% rename(sample_id = SampleID)
+} else {
+  shannon_raw <- shannon_raw %>% rename(sample_id = 1)
+}
+
+#Find the shannon column
+sh_col <- names(shannon_raw)[grepl("^shannon$|shannon", names(shannon_raw), ignore.case = TRUE)][1]
+stopifnot(!is.na(sh_col))
+shannon_df <- shannon_raw %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    Shannon   = as.numeric(.data[[sh_col]])
+  )
+
+#Merge and Filter to Bibi
+dat <- shannon_df %>%
+  left_join(meta_df, by = c("sample_id" = "#SampleID")) %>%
+  filter(subject_id == BIBI_ID) %>%
+  filter(!is.na(pregnancy_day), !is.na(Shannon)) %>%
+  mutate(
+    pregnancy_day = as.numeric(pregnancy_day),
+
+    #Phase (color)
+    phase = case_when(
+      pregnancy_day < 0 ~ "Pre-pregnancy",
+      pregnancy_status == "complication" ~ "Complication",
+      pregnancy_status == "pregnant" ~ "Pregnant",
+      TRUE ~ "Other"
+    ),
+    phase = factor(phase, levels = c("Pre-pregnancy", "Pregnant", "Complication", "Other")),
+
+#Trend stat
+bibi_trend <- tibble(
+  test = "Spearman: pregnancy_day vs Shannon",
+  n = nrow(dat),
+  stat = suppressWarnings(cor(dat$pregnancy_day, dat$Shannon, method = "spearman", use = "complete.obs")),
+  p_value = suppressWarnings(cor.test(dat$pregnancy_day, dat$Shannon, method = "spearman", exact = FALSE)$p.value)
+)
+
+#Phase comparisons
+pre_vs_preg <- wilcox.test(
+  Shannon ~ phase,
+  data = dat %>% filter(phase %in% c("Pre-pregnancy", "Pregnant")),
+  exact = FALSE
+)
+
+preg_vs_comp <- wilcox.test(
+  Shannon ~ phase,
+  data = dat %>% filter(phase %in% c("Pregnant", "Complication")),
+  exact = FALSE
+)
+
+phase_stats <- tibble(
+  test = c("Wilcoxon: Pre-pregnancy vs Pregnant",
+           "Wilcoxon: Pregnant vs Complication"),
+  n = c(
+    nrow(dat %>% filter(phase %in% c("Pre-pregnancy", "Pregnant"))),
+    nrow(dat %>% filter(phase %in% c("Pregnant", "Complication")))
+  ),
+  stat = c(pre_vs_preg$statistic[[1]], preg_vs_comp$statistic[[1]]),
+  p_value = c(pre_vs_preg$p.value, preg_vs_comp$p.value)
+)
+
+stats_out <- bind_rows(bibi_trend, phase_stats) %>%
+  mutate(p_adj_bh = p.adjust(p_value, method = "BH"))
+
+print(stats_out)
+readr::write_csv(stats_out, OUT_STATS)
+
+    #Stage (shapes)
+    stage = case_when(
+      pregnancy_day < 0 ~ "Pre-pregnancy",
+      pregnancy_status == "complication" ~ "Complication",
+      Trimester %in% c("First Trimester", "Second Trimester", "Third Trimester") ~ Trimester,
+      TRUE ~ "Other"
+    ),
+    stage = factor(
+      stage,
+      levels = c("Pre-pregnancy", "First Trimester", "Second Trimester", "Third Trimester", "Complication", "Other")
+    )
+  ) %>%
+  arrange(pregnancy_day)
+
+#Build Plot
+p <- ggplot(dat, aes(x = pregnancy_day, y = Shannon, color = phase, shape = stage)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_vline(xintercept = MIS_DAY, linetype = "dashed", linewidth = 1) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Bibi: Shannon diversity over time",
+    x = "Pregnancy day (day 0 = conception)",
+    y = "Shannon diversity",
+    color = "Phase",
+    shape = "Stage"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+#Save outputs
+png_out <- paste0(OUT_PREFIX, ".png")
+pdf_out <- paste0(OUT_PREFIX, ".pdf")
+
+ggsave(png_out, p, width = 8, height = 5.5, dpi = 300)
+ggsave(pdf_out, p, width = 8, height = 5.5)
+
+cat("Wrote:\n")
+cat("  ", png_out, "\n")
+cat("  ", pdf_out, "\n")
+
+#Run in Bash 
+cd /projectnb/pongogp/zealbert
+chmod +x bibi_shannon_over_time_WITHPRE_mis113_NO_SMOOTH.R
+Rscript bibi_shannon_over_time_WITHPRE_mis113_NO_SMOOTH.R
+
+ls -lh Bibi_Shannon_over_time_WITHPRE_mis113_NO_SMOOTH.*
