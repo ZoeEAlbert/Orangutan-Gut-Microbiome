@@ -1,0 +1,159 @@
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(biomformat)
+  library(scales)
+  library(forcats)
+})
+
+BIOM <- "tmp_no_unassigned_export/feature-table.biom"
+TAX  <- "tmp_taxonomy_export/taxonomy.tsv"
+META <- "meta_for_table.tsv"
+
+OUT_PNG <- "/projectnb/pongogp/zealbert/taxa_barplot_horizontal.png"
+OUT_PDF <- "/projectnb/pongogp/zealbert/taxa_barplot_horizontal.pdf"
+
+stopifnot(file.exists(BIOM), file.exists(TAX), file.exists(META))
+
+#Read biom
+biom_obj <- read_biom(BIOM)
+mat <- as.matrix(biom_data(biom_obj))
+
+feat <- as.data.frame(mat)
+feat$FeatureID <- rownames(feat)
+feat <- feat[, c("FeatureID", setdiff(names(feat), "FeatureID"))]
+
+#Read taxonomy
+tax <- read_tsv(TAX, show_col_types = FALSE)
+if ("Feature ID" %in% names(tax)) {
+  names(tax)[names(tax) == "Feature ID"] <- "FeatureID"
+}
+tax <- tax[, c("FeatureID", "Taxon")]
+
+#Read metadata
+meta <- read_tsv(META, show_col_types = FALSE)
+if ("#SampleID" %in% names(meta)) {
+  names(meta)[names(meta) == "#SampleID"] <- "SampleID"
+}
+
+#Long format
+df <- pivot_longer(
+  feat,
+  cols = -FeatureID,
+  names_to = "SampleID",
+  values_to = "Count"
+) %>%
+  left_join(tax, by = "FeatureID") %>%
+  mutate(
+    Genus = str_extract(Taxon, "g__[^;]+"),
+    Genus = str_remove(Genus, "g__"),
+    Genus = if_else(is.na(Genus) | Genus == "" | Genus == "uncultured", "Unclassified", Genus)
+  )
+
+#Relative abundance within sample
+df <- df %>%
+  group_by(SampleID) %>%
+  mutate(RelAbund = Count / sum(Count)) %>%
+  ungroup()
+
+#Top 10 REAL genera only
+top_taxa <- df %>%
+  filter(!Genus %in% c("Unclassified")) %>%
+  group_by(Genus) %>%
+  summarise(total = sum(RelAbund), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = 10) %>%
+  pull(Genus)
+
+print(top_taxa)
+
+#Build plot table
+df2 <- df %>%
+  filter(Genus != "Unclassified") %>%
+  mutate(Genus2 = if_else(Genus %in% top_taxa, Genus, "Other")) %>%
+  group_by(SampleID, Genus2) %>%
+  summarise(RelAbund = sum(RelAbund), .groups = "drop") %>%
+  group_by(SampleID) %>%
+  mutate(RelAbund = RelAbund / sum(RelAbund)) %>%
+  ungroup() %>%
+  left_join(meta, by = "SampleID")
+
+#Order legend 
+genus_order <- c(top_taxa, "Other")
+df2$Genus2 <- factor(df2$Genus2, levels = genus_order)
+
+#Pregnancy-day column
+preg_col <- NULL
+for (nm in c("Pregnancy_day", "Pregnancy day", "pregnancy_day", "PregnancyDay", "Day")) {
+  if (nm %in% names(df2)) {
+    preg_col <- nm
+    break
+  }
+}
+
+#Fallback date col
+date_col <- NULL
+for (nm in c("Collection_Date", "collection_date", "Date", "date")) {
+  if (nm %in% names(df2)) {
+    date_col <- nm
+    break
+  }
+}
+
+#Build labels/order
+if (!is.null(preg_col)) {
+  ord_df <- df2 %>%
+    distinct(SampleID, .data[[preg_col]]) %>%
+    mutate(DayValue = suppressWarnings(as.numeric(.data[[preg_col]])),
+           DisplayLabel = as.character(.data[[preg_col]])) %>%
+    arrange(DayValue)
+} else if (!is.null(date_col)) {
+  ord_df <- df2 %>%
+    distinct(SampleID, .data[[date_col]]) %>%
+    mutate(DayValue = as.Date(.data[[date_col]]),
+           DisplayLabel = as.character(.data[[date_col]])) %>%
+    arrange(DayValue)
+} else {
+  ord_df <- df2 %>%
+    distinct(SampleID) %>%
+    mutate(DisplayLabel = SampleID)
+}
+
+sample_levels <- ord_df$SampleID
+df2$SampleID <- factor(df2$SampleID, levels = sample_levels)
+
+label_map <- ord_df$DisplayLabel
+names(label_map) <- ord_df$SampleID
+
+#Colors: grey only for Other, defaults for rest
+taxa_levels <- levels(df2$Genus2)
+non_other <- setdiff(taxa_levels, "Other")
+default_cols <- scales::hue_pal()(length(non_other))
+names(default_cols) <- non_other
+fill_vals <- c(default_cols, Other = "grey70")
+
+p <- ggplot(df2, aes(x = SampleID, y = RelAbund, fill = Genus2)) +
+  geom_col(width = 0.9) +
+  coord_flip() +
+  scale_x_discrete(labels = label_map) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1),expand = c(0, 0)) +
+  scale_fill_manual(values = fill_vals, drop = FALSE) +
+  labs(
+    x = if (!is.null(preg_col)) "Pregnancy day" else "Sample",
+    y = "Relative abundance",
+    fill = "Genus"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.text.y = element_text(color = "black", size = 8),
+    axis.title = element_text(color = "black", size = 12),
+    legend.title = element_text(color = "black", size = 11, face = "bold"),
+    legend.text = element_text(color = "black", size = 9),
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+print(p)
+
+ggsave(OUT_PNG, p, width = 12, height = 8, dpi = 600, bg = "white")
+ggsave(OUT_PDF, p, width = 12, height = 8, bg = "white")
