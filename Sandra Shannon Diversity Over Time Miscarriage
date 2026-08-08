@@ -1,0 +1,142 @@
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+
+#Metadata
+META <- "/projectnb/pongogp/zealbert/metadata_pregnancy_bibiandsandra_withdates.tsv"
+SHAN <- "/projectnb/pongogp/zealbert/shannon_merged_outer_export/alpha-diversity.tsv"
+
+OUT_PREFIX <- "Sandra_Shannon_over_time_PregVsPost_MATCH_BIBI"
+
+SANDRA_ID <- "sandrasu_01"
+
+BIRTH_DAY <- 249
+
+stopifnot(file.exists(META), file.exists(SHAN))
+
+#Read metadata
+meta_df <- readr::read_tsv(META, show_col_types = FALSE) %>%
+  mutate(`#SampleID` = as.character(`#SampleID`))
+
+#Read Shannon (QIIME)
+shannon_raw <- readr::read_tsv(SHAN, show_col_types = FALSE)
+
+#Handle common QIIME export formats
+if ("#SampleID" %in% names(shannon_raw)) {
+  shannon_raw <- shannon_raw %>% rename(sample_id = `#SampleID`)
+} else if ("SampleID" %in% names(shannon_raw)) {
+  shannon_raw <- shannon_raw %>% rename(sample_id = SampleID)
+} else {
+  shannon_raw <- shannon_raw %>% rename(sample_id = 1)
+}
+
+#Find Shannon Column
+sh_col <- names(shannon_raw)[grepl("^shannon$|shannon", names(shannon_raw), ignore.case = TRUE)][1]
+stopifnot(!is.na(sh_col))
+
+shannon_df <- shannon_raw %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    Shannon   = as.numeric(.data[[sh_col]])
+  )
+
+#Merge and filter to Sandra
+dat <- shannon_df %>%
+  left_join(meta_df, by = c("sample_id" = "#SampleID")) %>%
+  filter(subject_id == SANDRA_ID) %>%
+  filter(!is.na(pregnancy_day), !is.na(Shannon)) %>%
+  mutate(
+    pregnancy_day = as.numeric(pregnancy_day),
+
+#Trend stat
+sandra_trend <- tibble(
+  test = "Spearman: pregnancy_day vs Shannon",
+  n = nrow(dat),
+  stat = suppressWarnings(cor(dat$pregnancy_day, dat$Shannon, method = "spearman", use = "complete.obs")),
+  p_value = suppressWarnings(cor.test(dat$pregnancy_day, dat$Shannon, method = "spearman", exact = FALSE)$p.value)
+)
+
+#Phase comparison
+preg_vs_post <- wilcox.test(
+  Shannon ~ phase,
+  data = dat %>% filter(phase %in% c("Pregnant", "Postpartum")),
+  exact = FALSE
+)
+
+phase_stats <- tibble(
+  test = "Wilcoxon: Pregnant vs Postpartum",
+  n = nrow(dat %>% filter(phase %in% c("Pregnant", "Postpartum"))),
+  stat = preg_vs_post$statistic[[1]],
+  p_value = preg_vs_post$p.value
+)
+
+stats_out <- bind_rows(sandra_trend, phase_stats) %>%
+  mutate(p_adj_bh = p.adjust(p_value, method = "BH"))
+
+print(stats_out)
+readr::write_csv(stats_out, OUT_STATS)
+
+    #Phase (color): match Bibi palette
+    phase = case_when(
+      Trimester == "New mom" ~ "Postpartum",
+      pregnancy_status == "pregnant" ~ "Pregnant",
+      TRUE ~ NA_character_
+    ),
+    phase = factor(phase, levels = c("Pregnant", "Postpartum”),
+
+    #Stage (shape)
+    stage = case_when(
+      Trimester == "Second Trimester" ~ "Second Trimester",
+      Trimester == "Third Trimester"  ~ "Third Trimester",
+      Trimester == "New mom"          ~ "Postpartum",
+      TRUE ~ NA_character_
+    ),
+    stage = factor(stage, levels = c("Second Trimester", "Third Trimester", "Postpartum"))
+  ) %>%
+  filter(!is.na(phase), !is.na(stage)) %>%
+  arrange(pregnancy_day)
+
+#Plot
+p <- ggplot(dat, aes(x = pregnancy_day, y = Shannon, color = phase, shape = stage)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_vline(xintercept = BIRTH_DAY, linetype = "dashed", linewidth = 1) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Sandra: Shannon diversity over time",
+    x = "Pregnancy day (day 0 = conception)",
+    y = "Shannon diversity",
+    color = "Phase",
+    shape = "Stage"
+  ) +
+  #Match Bibi colors
+  scale_color_manual(values = c(
+    "Pregnant" = "#009E73",
+    "Postpartum" = "#0072B2"
+  )) +
+  #Shapes
+  scale_shape_manual(values = c(
+    "Second Trimester" = 16,  # circle
+    "Third Trimester"  = 17,  # triangle
+    "Postpartum"          = 15   # square
+  )) +
+  guides(
+    color = guide_legend(order = 1),
+    shape = guide_legend(order = 2)
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+#Save outputs
+png_out <- paste0(OUT_PREFIX, ".png")
+pdf_out <- paste0(OUT_PREFIX, ".pdf")
+
+ggsave(png_out, p, width = 8, height = 5.5, dpi = 300)
+ggsave(pdf_out, p, width = 8, height = 5.5)
+
+cat("Wrote:\n")
+cat("  ", png_out, "\n")
+cat("  ", pdf_out, "\n")
