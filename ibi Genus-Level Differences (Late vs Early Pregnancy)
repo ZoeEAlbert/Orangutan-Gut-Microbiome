@@ -1,0 +1,186 @@
+cat > volcano_bibi_genus_final.R <<'RSCRIPT'
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(ggplot2)
+  library(ggrepel)
+})
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 1) {
+  stop("Usage: Rscript volcano_bibi_genus_final.R Bibi_genus_ANCOMBC2_results.csv [out_prefix]")
+}
+
+in_csv <- args[1]
+out_prefix <- ifelse(length(args) >= 2, args[2], "Bibi_genus_volcano_final")
+
+df <- read_csv(in_csv, show_col_types = FALSE)
+
+#Detect ANCOMBC2 Late vs Early columns
+lfc_col  <- names(df)[str_detect(names(df), "^lfc_.*stage_groupLate$")][1]
+q_col    <- names(df)[str_detect(names(df), "^q_.*stage_groupLate$")][1]
+diff_col <- names(df)[str_detect(names(df), "^diff_.*stage_groupLate$")][1]
+
+if (is.na(lfc_col))  lfc_col  <- names(df)[str_detect(names(df), "lfc") & str_detect(names(df), "Late")][1]
+if (is.na(q_col))    q_col    <- names(df)[str_detect(names(df), "^q_") & str_detect(names(df), "Late")][1]
+if (is.na(diff_col)) diff_col <- names(df)[str_detect(names(df), "^diff_") & str_detect(names(df), "Late")][1]
+
+if (is.na(lfc_col) || is.na(q_col)) {
+  print(names(df))
+  stop("Could not detect LFC and q columns.")
+}
+
+#Detect taxonomy column
+tax_string_col <- NA
+for (cc in names(df)) {
+  vals <- df[[cc]]
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) next
+  if (mean(str_detect(as.character(vals), ";")) > 0.5) {
+    tax_string_col <- cc
+    break
+  }
+}
+
+if (is.na(tax_string_col)) {
+  stop("Could not detect taxonomy column.")
+}
+
+#Extract clean genus (NO g__, NO f__, etc)
+extract_genus <- function(x) {
+  x <- as.character(x)
+
+  g <- str_match(x, "g__([^;]+)")[,2]
+  out <- ifelse(!is.na(g) & g != "", g, NA)
+
+  if (any(is.na(out))) {
+    last_rank <- sapply(strsplit(x, ";"), function(parts) {
+      parts <- str_trim(parts)
+      parts <- parts[parts != ""]
+      if (length(parts) == 0) return(NA_character_)
+      last <- tail(parts, 1)
+      str_replace(last, "^[a-z]__", "")
+    })
+    out[is.na(out)] <- last_rank[is.na(out)]
+  }
+
+  out <- str_replace_all(out, "_", " ")
+  out
+}
+
+#Build plotting dataframe
+plot_df <- df %>%
+  mutate(
+    tax_string = as.character(.data[[tax_string_col]]),
+    label = extract_genus(tax_string),
+    lfc = as.numeric(.data[[lfc_col]]),
+    q   = as.numeric(.data[[q_col]])
+  ) %>%
+  filter(is.finite(lfc), is.finite(q)) %>%
+  mutate(
+    q_safe = pmax(q, 1e-300),
+    neglog10q = -log10(q_safe),
+    significant = q < 0.05
+  )
+
+#Decide which taxa to label
+sig_df <- plot_df %>% filter(significant)
+
+if (nrow(sig_df) >= 2) {
+  label_df <- sig_df %>% arrange(q) %>% slice_head(n = 15)
+} else if (nrow(sig_df) == 1) {
+  label_df <- bind_rows(
+    sig_df,
+    plot_df %>% arrange(desc(abs(lfc))) %>% slice_head(n = 8)
+  ) %>% distinct(label, .keep_all = TRUE)
+} else {
+  label_df <- bind_rows(
+    plot_df %>% arrange(q) %>% slice_head(n = 8),
+    plot_df %>% arrange(desc(abs(lfc))) %>% slice_head(n = 8)
+  ) %>% distinct(label, .keep_all = TRUE)
+}
+
+#Make Lachnospiraceae label sit ABOVE the dashed q=0.05 line
+q_line <- -log10(0.05)
+
+label_df <- label_df %>%
+  mutate(
+    y_nudge = ifelse(label == "Lachnospiraceae", 0.08, 0)  # tiny bump up
+  )
+
+#Set plot limits for breathing room
+xpad <- 0.35
+ypad <- 0.3
+
+xlim <- range(plot_df$lfc, na.rm = TRUE)
+ylim <- range(plot_df$neglog10q, na.rm = TRUE)
+
+xlim <- c(xlim[1] - xpad, xlim[2] + xpad)
+ylim <- c(0, ylim[2] + ypad)
+
+#Build volcano plot
+p <- ggplot(plot_df, aes(x = lfc, y = neglog10q)) +
+
+  geom_point(data = plot_df %>% filter(!significant),
+             color = "grey75",
+             alpha = 0.35,
+             size = 2) +
+
+  geom_point(data = plot_df %>% filter(significant),
+             color = "#1f4aff",
+             size = 3) +
+
+  geom_vline(xintercept = 0, linewidth = 0.4) +
+
+  geom_hline(yintercept = q_line,
+             linetype = "dashed",
+             linewidth = 0.4) +
+
+ #Force leader lines to show and connect labels to points
+  geom_text_repel(
+    data = label_df,
+    aes(label = label, y = neglog10q + y_nudge),
+    size = 3.6,
+    box.padding = 0.35,
+    point.padding = 0.25,
+    force = 1,
+    min.segment.length = 0,     
+    segment.size = 0.5,        
+    segment.color = "grey40",
+    segment.alpha = 0.75,
+    max.overlaps = Inf,
+    seed = 1
+  ) +
+
+  coord_cartesian(xlim = xlim, ylim = ylim, clip = "off") +
+
+  labs(
+    title = "Bibi: Genus-level differences (Late vs Early pregnancy)",
+    x = "Log fold change (Late vs Early)",
+    y = expression(-log[10](q))
+  ) +
+
+  theme_classic(base_size = 17) +
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    axis.title = element_text(face = "bold"),
+    plot.margin = margin(10, 20, 10, 15)
+  )
+
+#Save
+pdf_out <- paste0(out_prefix, ".pdf")
+png_out <- paste0(out_prefix, ".png")
+
+ggsave(pdf_out, p, width = 8.5, height = 6.5)
+ggsave(png_out, p, width = 8.5, height = 6.5, dpi = 300)
+
+cat("Wrote:\n")
+cat("  ", pdf_out, "\n")
+cat("  ", png_out, "\n")
+RSCRIPT
+
+chmod +x volcano_bibi_genus_final.R
+Rscript volcano_bibi_genus_final.R Bibi_genus_ANCOMBC2_results.csv Bibi_genus_volcano_final
