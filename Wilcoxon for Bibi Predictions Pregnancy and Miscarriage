@@ -1,0 +1,157 @@
+cat > targeted_wilcoxon_bibi.R <<'RSCRIPT'
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+})
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 3) {
+  stop("Usage: Rscript targeted_wilcoxon_bibi.R feature-table.tsv taxonomy.tsv metadata.tsv [out_prefix]")
+}
+feature_tsv <- args[1]
+tax_tsv     <- args[2]
+meta_tsv    <- args[3]
+out_prefix  <- ifelse(length(args) >= 4, args[4], "Bibi")
+
+#Read BIOM
+read_feature_table <- function(path) {
+  raw <- readr::read_lines(path)
+  header_idx <- which(str_detect(raw, "^#OTU ID\\b|^#?Feature ID\\b"))
+  if (length(header_idx) == 0) stop("Could not find feature table header line (#OTU ID or Feature ID).")
+  tf <- tempfile(fileext = ".tsv")
+  write_lines(raw[header_idx:length(raw)], tf)
+  df <- readr::read_tsv(tf, show_col_types = FALSE)
+  names(df)[1] <- "FeatureID"
+  df
+}
+
+feat <- read_feature_table(feature_tsv)
+tax  <- readr::read_tsv(tax_tsv, show_col_types = FALSE)
+names(tax)[1] <- "FeatureID"
+
+meta <- readr::read_tsv(meta_tsv, show_col_types = FALSE)
+if (!("SampleID" %in% names(meta))) stop("metadata must contain SampleID")
+if (!("stage_group" %in% names(meta))) stop("metadata must contain stage_group (Early/Late)")
+
+meta <- meta %>%
+  mutate(stage_group = factor(stage_group, levels = c("Early","Late"))) %>%
+  filter(!is.na(stage_group))
+
+#Align samples
+sample_cols <- setdiff(names(feat), "FeatureID")
+common <- intersect(sample_cols, meta$SampleID)
+if (length(common) < 2) stop("Too few overlapping SampleIDs between feature table and metadata.")
+
+feat <- feat %>% select(FeatureID, all_of(common))
+meta <- meta %>% filter(SampleID %in% common) %>% arrange(match(SampleID, common))
+
+#Matrix
+mat <- feat %>% tibble::column_to_rownames("FeatureID") %>% as.matrix()
+
+#Size-factor normalization (median-of-ratios)
+gm <- apply(mat, 1, function(x) {
+  x <- x[x > 0]
+  if (length(x) == 0) return(NA_real_)
+  exp(mean(log(x)))
+})
+keep <- !is.na(gm) & gm > 0
+mat2 <- mat[keep, , drop=FALSE]
+gm2 <- gm[keep]
+ratios <- sweep(mat2, 1, gm2, "/")
+sf <- apply(ratios, 2, function(x) median(x[is.finite(x) & x > 0], na.rm=TRUE))
+if (any(!is.finite(sf)) || any(sf <= 0)) stop("Bad size factors; check for empty samples.")
+norm <- sweep(mat, 2, sf, "/")   # normalize full mat (zeros preserved)
+
+norm_df <- as.data.frame(norm) %>%
+  tibble::rownames_to_column("FeatureID") %>%
+  left_join(tax %>% select(FeatureID, Taxon), by="FeatureID")
+
+#Targeted taxa from hypotheses 
+targets <- tibble::tribble(
+  ~taxon,                     ~direction,
+  "Bifidobacterium",          "Decrease",
+  "Bacteroides",              "Decrease",
+  "Proteobacteria",           "Decrease",
+  "Actinobacteria",           "Decrease",
+  "Escherichia",              "Decrease",
+  "Streptococcus salivarius", "Decrease",
+  "Lactobacillus",            "Decrease",
+  "Klebsiella",               "Increase"
+)
+
+#Map each target to rows in taxonomy
+match_rows <- function(taxon_label) {
+  if (taxon_label == "Streptococcus salivarius") {
+    which(str_detect(norm_df$Taxon, "s__[^;]*salivarius") | str_detect(norm_df$Taxon, regex("\\bsalivarius\\b", ignore_case=TRUE)))
+  } else {
+    which(str_detect(norm_df$Taxon, paste0("(^|;\\s*)[pgs]__\\s*", taxon_label, "(;|$)")) |
+          str_detect(norm_df$Taxon, regex(paste0("\\b", taxon_label, "\\b"), ignore_case=TRUE)))
+  }
+}
+
+#Abundance per sample (sum of matched rows); if no rows matched -> all zeros
+abund_by_target <- lapply(targets$taxon, function(tn) {
+  idx <- match_rows(tn)
+  if (length(idx) == 0) {
+    setNames(rep(0, ncol(norm)), colnames(norm))
+  } else {
+    vec <- colSums(norm[idx, , drop=FALSE], na.rm=TRUE)
+    setNames(as.numeric(vec), names(vec))
+  }
+})
+names(abund_by_target) <- targets$taxon
+
+safe_wilcox <- function(values, groups) {
+  df <- data.frame(value = as.numeric(values), stage = groups)
+  df$value[!is.finite(df$value)] <- 0   # treat NA/Inf as 0
+  df <- df %>% filter(!is.na(stage))
+  if (nlevels(droplevels(df$stage)) < 2) {
+    return(list(p=NA_real_, W=NA_real_))
+  }
+  if (length(unique(df$stage)) < 2) {
+    return(list(p=NA_real_, W=NA_real_))
+  }
+  wt <- suppressWarnings(wilcox.test(value ~ stage, data=df, exact=FALSE))
+  list(p=wt$p.value, W=unname(wt$statistic))
+}
+
+res <- lapply(seq_len(nrow(targets)), function(i) {
+  tn <- targets$taxon[i]
+  dir <- targets$direction[i]
+  vals <- abund_by_target[[tn]][meta$SampleID]
+  df <- data.frame(value = as.numeric(vals), stage = meta$stage_group)
+  df$value[!is.finite(df$value)] <- 0
+
+  wt <- safe_wilcox(df$value, df$stage)
+
+  med_early <- median(df$value[df$stage=="Early"], na.rm=TRUE)
+  med_late  <- median(df$value[df$stage=="Late"],  na.rm=TRUE)
+
+  data.frame(
+    taxon = tn,
+    direction = dir,
+    n_Early = sum(df$stage=="Early"),
+    n_Late  = sum(df$stage=="Late"),
+    median_Early = med_early,
+    median_Late  = med_late,
+    log2FC_median = log2((med_late + 1)/(med_early + 1)),
+    p_value = wt$p,
+    W = wt$W
+  )
+}) %>% bind_rows()
+
+res <- res %>%
+  mutate(p_adj_BH = p.adjust(p_value, method="BH")) %>%
+  arrange(p_adj_BH)
+
+write_csv(res, paste0(out_prefix, "_targeted_wilcoxon_results.csv"))
+
+cat("\n=== Targeted Wilcoxon (BH across hypothesized taxa only) ===\n")
+print(res)
+cat("\nWrote: ", paste0(out_prefix, "_targeted_wilcoxon_results.csv"), "\n", sep="")
+RSCRIPT
+
+chmod +x targeted_wilcoxon_bibi.R
