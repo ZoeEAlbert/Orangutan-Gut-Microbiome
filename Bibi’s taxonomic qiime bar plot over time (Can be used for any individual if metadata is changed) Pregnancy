@@ -1,0 +1,42 @@
+#Export
+qiime tools export \
+  --input-path bibi_sandra_table_counts.qza \
+  --output-path tmp_bibi_sandra_export
+
+#Make a clean sample-id list directly from biom summarize output
+sed 's/:$//' table_sample_ids.txt > table_sample_ids.clean.txt
+biom summarize-table -i tmp_bibi_sandra_export/feature-table.biom | \
+awk '
+  /^Counts\/sample detail:/ {flag=1; next}
+  flag && NF==0 {next}
+  flag {print $1}
+' > table_sample_ids.txt
+
+wc -l table_sample_ids.txt
+head table_sample_ids.txt
+
+#Header
+head -n 1 metadata_pregnancy_bibiandsandra_barcode.tsv > meta_for_table.tsv
+
+awk 'NR==FNR {keep[$1]=1; next} FNR==1 {next} ($1 in keep)' \
+  table_sample_ids.clean.txt metadata_pregnancy_bibiandsandra_barcode.tsv \
+  >> meta_for_table.tsv
+
+#Sort metadata by collection date
+| sort -t$'\t' -k3,3) \
+> meta_for_table_sorted.tsv
+
+#Filter out unassigned 
+qiime taxa filter-table \
+  --i-table bibi_sandra_table_counts.qza \
+  --i-taxonomy taxonomy_04to08.qza \
+  --p-exclude Unassigned \
+  --o-filtered-table bibi_sandra_noUnassigned_table.qza
+
+#Make barplot
+qiime taxa barplot \
+  --i-table bibi_sandra_noUnassigned_table.qza \
+  --i-taxonomy taxonomy_04to08.qza \
+  --m-metadata-file meta_for_table.tsv \
+  --o-visualization taxa_barplot_noUnassigned.qzv
+
