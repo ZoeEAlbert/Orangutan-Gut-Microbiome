@@ -1,0 +1,197 @@
+rm(list = ls())
+
+library(tidyverse)
+library(ggplot2)
+
+#These are the file paths that I am using
+meta_file <- "/projectnb/pongogp/zealbert/Orangutan_Microbiome_Energetics_Merged.tsv"
+shannon_file <- "shannon_vector.tsv"
+
+#Read Files
+meta <- read.delim(
+  meta_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+alpha_df <- read.delim(
+  shannon_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Rename Shannon columns
+colnames(alpha_df)[1] <- "#SampleID"
+colnames(alpha_df)[2] <- "Shannon"
+
+#Merge
+alpha_meta <- left_join(alpha_df, meta, by = "#SampleID")
+
+#Clean
+alpha_meta <- alpha_meta %>%
+  filter(!is.na(Orangutan)) %>%
+  mutate(
+    Orangutan = trimws(Orangutan),
+    AgeSexClass = trimws(AgeSexClass)
+  )
+
+#I want the order to be the same
+desired_order <- c(
+  "Alfred", "Balon", "Bilbo", "Dude", "Eli", "Obiwan", "Tunjuk",
+  "Bayas", "King", "Berani", "Bibi", "Kabar", "Sandra", "Tari", "Telur"
+)
+
+present_order <- desired_order[desired_order %in% unique(alpha_meta$Orangutan)]
+alpha_meta$Orangutan <- factor(alpha_meta$Orangutan, levels = present_order)
+
+#Make sure AgeSexClass is ordered
+alpha_meta$AgeSexClass <- factor(
+  alpha_meta$AgeSexClass,
+  levels = c("Adult Female", "Flanged Male", "Juvenile Male", "Unflanged Male")
+)
+
+#Create n labels for x axis
+n_table <- alpha_meta %>%
+  group_by(Orangutan) %>%
+  summarize(n_samples = n(), .groups = "drop")
+
+x_labels <- setNames(
+  paste0(as.character(n_table$Orangutan), "\(n=", n_table$n_samples, ")"),
+  n_table$Orangutan
+)
+
+orangutan_class <- alpha_meta %>%
+  group_by(Orangutan) %>%
+  summarize(AgeSexClass = first(AgeSexClass), .groups = "drop")
+
+alpha_meta <- left_join(alpha_meta, orangutan_class, by = "Orangutan", suffix = c("", "_fixed"))
+alpha_meta$AgeSexClass <- alpha_meta$AgeSexClass_fixed
+alpha_meta$AgeSexClass_fixed <- NULL
+
+#Plot 1: Orangutan
+p1 <- ggplot(alpha_meta, aes(x = Orangutan, y = Shannon, fill = AgeSexClass)) +
+  geom_boxplot(
+    colour = "black",
+    width = 0.7,
+    outlier.shape = NA,
+    alpha = 0.8
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 3,
+    alpha = 0.75,
+    color = "black"
+  ) +
+  scale_x_discrete(labels = x_labels) +
+  scale_fill_manual(
+    values = c(
+      "Adult Female" = "#E69F00",
+      "Flanged Male" = "#56B4E9",
+      "Juvenile Male" = "#009E73",
+      "Unflanged Male" = "#CC79A7"
+    ),
+    drop = FALSE
+  ) +
+  labs(
+    title = "Shannon Diversity by Orangutan",
+    x = "Orangutan",
+    y = "Shannon Diversity",
+    fill = "Age-Sex Class"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_text(face = "bold")
+  )
+
+print(p1)
+
+ggsave(
+  "shannon_by_orangutan_colored_n.png",
+  plot = p1,
+  width = 16,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "shannon_by_orangutan_colored_n.pdf",
+  plot = p1,
+  width = 16,
+  height = 7,
+  bg = "white"
+)
+
+#Second Plot Shannon vs age
+alpha_age <- alpha_meta %>%
+filter(!is.na(Age))
+
+cat("\nNumber of samples used in Shannon vs Age plot:", nrow(alpha_age), "\n")
+cat("Orangutans represented in Shannon vs Age plot:\n")
+print(sort(unique(alpha_age$Orangutan)))
+
+p2 <- ggplot(alpha_age, aes(x = Age, y = Shannon)) +
+geom_point(
+size = 3,
+alpha = 0.75
+) +
+geom_smooth(
+method = "lm",
+color = "black",
+linewidth = 1,
+se = TRUE
+) +
+labs(
+title = "Shannon Diversity vs Age",
+x = "Age",
+y = "Shannon Diversity"
+) +
+pretty_theme +
+theme(axis.text.x = element_text(angle = 0, color = "black"))
+
+print(p2)
+
+ggsave(
+filename = "shannon_vs_age_final.png",
+plot = p2,
+width = 8,
+height = 6,
+dpi = 300,
+bg = "white"
+)
+
+#Save as a PDF
+ggsave(
+filename = "shannon_vs_age_final.pdf",
+plot = p2,
+width = 8,
+height = 6,
+bg = "white"
+)
+
+#Where Saved
+cat("\nCurrent working directory:\n")
+print(getwd())
+
+cat("\nSaved files:\n")
+print(c(
+"shannon_by_orangutan_summary.tsv",
+"shannon_kruskal_test.txt",
+"shannon_age_spearman_test.txt",
+"shannon_by_orangutan_final.png",
+"shannon_by_orangutan_final.pdf",
+"shannon_vs_age_final.png",
+"shannon_vs_age_final.pdf"
+))
+
+cat("\nDo these files exist?\n")
+print(file.exists("shannon_by_orangutan_final.png"))
+print(file.exists("shannon_by_orangutan_final.pdf"))
+print(file.exists("shannon_vs_age_final.png"))
+print(file.exists("shannon_vs_age_final.pdf"))
