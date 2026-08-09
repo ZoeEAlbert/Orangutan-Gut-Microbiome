@@ -1,0 +1,92 @@
+#Correlation grid
+cor_results <- expand.grid(
+  Family = unique(family_df_top$Family),
+  Nutrient = c("energy", "ndf", "carbs", "lipids", "protein"),
+  stringsAsFactors = FALSE
+)
+
+cor_results$cor <- NA_real_
+
+head(cor_results)
+
+#Fill in the correlations
+for (i in seq_len(nrow(cor_results))) {
+  fam <- cor_results$Family[i]
+  nut <- cor_results$Nutrient[i]
+
+  df_sub <- family_df_top[family_df_top$Family == fam, ]
+
+  cor_results$cor[i] <- cor(
+    df_sub$RelAbundance,
+    df_sub[[nut]],
+    use = "complete.obs"
+  )
+}
+
+#Clean labels 
+cor_results$Nutrient <- dplyr::recode(
+  cor_results$Nutrient,
+  energy = "Energy (kcal)",
+  ndf = "Fiber (NDF)",
+  carbs = "Carbohydrates",
+  lipids = "Lipids",
+  protein = "Protein"
+)
+
+family_order <- cor_results %>%
+  group_by(Family) %>%
+  summarise(mean_abs_cor = mean(abs(cor), na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(mean_abs_cor)) %>%
+  pull(Family)
+
+cor_results$Family <- factor(cor_results$Family, levels = family_order)
+cor_results$Nutrient <- factor(
+  cor_results$Nutrient,
+  levels = c("Energy (kcal)", "Fiber (NDF)", "Carbohydrates", "Lipids", "Protein")
+)
+
+cor_results$label <- sprintf("%.2f", cor_results$cor)
+
+head(cor_results)
+#Make the plot
+p_heat <- ggplot(cor_results, aes(x = Nutrient, y = Family, fill = cor)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = label), size = 3.2) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limits = c(-0.6, 0.6),
+    oob = scales::squish,
+    name = "Correlation"
+  ) +
+  labs(
+    title = "Correlation between microbial families and dietary nutrients",
+    x = "Nutrient",
+    y = "Family"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15, hjust = 0.5),
+    axis.title.x = element_text(size = 12, face = "bold"),
+    axis.title.y = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+p_heat
+
+#Save
+ggsave(
+  "family_nutrient_heatmap_clean.png",
+  p_heat,
+  width = 9,
+  height = 6.5,
+  dpi = 300,
+  bg = "white"
+)
