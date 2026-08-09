@@ -1,0 +1,42 @@
+#Read the correct Shannon file
+shannon <- read.delim(
+  "shannon_vector.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Standardize Column names
+colnames(shannon)[1] <- "SampleID"
+colnames(shannon)[2] <- "Shannon"
+
+#Merge with energetics metadata
+plot_data <- left_join(
+  meta,
+  shannon,
+  by = c("#SampleID" = "SampleID")
+) %>%
+  filter(!is.na(Shannon))
+#Calories vs Shannon plot
+p <- ggplot(plot_data, aes(x = Calories, y = Shannon, color = Orangutan)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_classic(base_size = 16) +
+  labs(
+    x = "Daily Energy Intake (kcal)",
+    y = "Shannon Diversity",
+    title = "Relationship Between Daily Energy Intake and Gut Microbial Diversity"
+  )
+
+print(p)
+
+ggsave(
+  "Calories_vs_Shannon.png",
+  plot = p,
+  width = 10,
+  height = 7,
+  dpi = 600
+)
+
+#Stats
+cor.test(plot_data$Calories, plot_data$Shannon, method = "spearman")
