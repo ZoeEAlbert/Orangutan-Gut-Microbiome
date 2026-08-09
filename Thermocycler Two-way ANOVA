@@ -1,0 +1,100 @@
+#Using the path /projectnb/pongogp/zealbert/Thermocycler_comparison_metadata.csv
+#Start R
+module purge
+module load miniconda
+conda activate qiime2-amplicon-2025.4
+hash -r
+R
+
+#Packages 
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(emmeans)
+})
+
+#Set input file
+infile <- "/projectnb/pongogp/zealbert/Thermocycler_comparison_metadata.csv"
+
+#Read CSV
+dat <- read.csv(infile, stringsAsFactors = FALSE, check.names = TRUE)
+
+#Define factors 
+dat$SDI   <- as.numeric(dat$SDI)
+dat$pcr_1 <- factor(dat$pcr_1, levels = c(8,16))
+dat$pcr_2 <- factor(dat$pcr_2, levels = c(8,16))
+dat$group <- factor(paste(dat$pcr_1, dat$pcr_2, sep=","), levels=c("8,8","8,16","16,8","16,16"))
+
+#Check
+print(table(dat$group))
+
+#Plots
+png("plot_SDI_box.png", width=900, height=600)
+boxplot(SDI ~ group, data=dat,
+        xlab="Thermocycler (PCR1,PCR2)", ylab="SDI",
+        main="SDI by thermocycler combination")
+dev.off()
+
+#Two-way ANOVA
+fit <- aov(SDI ~ pcr_1 * pcr_2, data=dat)
+sink("stats_ANOVA.txt")
+print(summary(fit))
+sink()
+
+#Tukey 
+tuk <- TukeyHSD(aov(SDI ~ group, data=dat))
+sink("stats_Tukey_group.txt")
+print(tuk)
+sink()
+
+cat("DONE. Files written.\n")
+
+#Load library 
+library(dplyr)
+library(ggplot2)
+
+#Read data
+dat <- read.csv(
+  "/projectnb/pongogp/zealbert/Thermocycler_comparison_metadata.csv",
+  stringsAsFactors = FALSE,
+  check.names = TRUE
+)
+
+#Clean and format data
+dat$SDI   <- as.numeric(dat$SDI)
+dat$pcr_1 <- factor(dat$pcr_1, levels = c(8,16))
+dat$pcr_2 <- factor(dat$pcr_2, levels = c(8,16))
+
+dat$group <- factor(
+  paste(dat$pcr_1, dat$pcr_2, sep = ","),
+  levels = c("8,8", "8,16", "16,8", "16,16")	)
+
+#Summarize mean and Standard error 
+sumdat <- dat %>%
+  group_by(group) %>%
+  summarise(
+    mean_sdi = mean(SDI, na.rm = TRUE),
+    se_sdi   = sd(SDI, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+)
+
+#Plot
+p <- ggplot(sumdat, aes(x = group, y = mean_sdi)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean_sdi - se, ymax = mean_sdi + se),
+                width = 0.15) +
+  theme_bw(base_size = 12) +
+  labs(
+    x = "Thermocycler combination (PCR1,PCR2)",
+    y = "Mean Shannon diversity (± SE)"
+  )
+
+#Save
+ggsave(
+  filename = "plot_SDI_mean_SE.png",
+  plot = p,
+  width = 6,
+  height = 4,
+  dpi = 300
+)
+
+cat("DONE: plot_SDI_mean_SE.png written\n")
