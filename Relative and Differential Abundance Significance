@@ -1,0 +1,94 @@
+#Load packages and files 
+library(tidyverse)
+
+meta_full <- read.delim("Orangutan_Microbiome_Energetics_Merged.tsv",
+                        sep = "\t", header = TRUE, check.names = FALSE)
+
+tax <- read.delim("tmp_tax_export/taxonomy.tsv",
+                  sep = "\t", header = TRUE, check.names = FALSE)
+
+feat <- read.delim("tmp_table_export/feature-table.tsv",
+                   sep = "\t", header = TRUE, skip = 1, check.names = FALSE)
+
+colnames(feat)[1] <- "FeatureID"
+colnames(tax)[1]  <- "FeatureID"
+
+#Join feature table and taxonomy
+ fb_df <- left_join(feat, tax, by = "FeatureID")
+colnames(fb_df)
+
+#Make the family column 
+family_df0 <- fb_df %>%
+  mutate(
+    Family = stringr::str_extract(Taxon, "D_4__[^;]+"),
+    Family = stringr::str_remove(Family, "D_4__")
+  )
+
+colnames(family_df0)
+table(is.na(family_df0$Family))
+
+#Sample Columns
+sample_cols <- setdiff(
+  colnames(family_df0),
+  c("FeatureID", "Taxon", "Confidence", "Consensus", "Phylum", "Family")
+)
+
+length(sample_cols)
+head(sample_cols)
+
+#Build long table 
+family_long <- family_df0[, c("Family", sample_cols)]
+family_long <- family_long[!is.na(family_long$Family), ]
+
+family_long <- pivot_longer(
+  family_long,
+  cols = all_of(sample_cols),
+  names_to = "SampleID",
+  values_to = "Abundance"
+)
+
+head(family_long)
+
+#Aggregate and join metadata
+family_df <- family_long %>%
+  group_by(SampleID, Family) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  group_by(SampleID) %>%
+  mutate(RelAbundance = Abundance / sum(Abundance, na.rm = TRUE)) %>%
+  ungroup()
+
+family_df <- left_join(family_df, meta_full, by = c("SampleID" = "#SampleID"))
+
+colnames(family_df)
+
+#Testing block
+family_df2 <- family_df %>%
+  select(
+    SampleID,
+    Family = `Family.x`,
+    Abundance,
+    RelAbundance,
+    energy = `Ttl Kcal eaten 1.782 no lignin Available Protein`,
+    ndf = `Total grams NDF eaten`,
+    carbs = `Total grams Carbo eaten`,
+    lipids = `Total grams Lipid eaten`,
+    protein = `Total grams Protein eaten Crude`
+  ) %>%
+  mutate(
+    energy = as.numeric(energy),
+    ndf = as.numeric(ndf),
+    carbs = as.numeric(carbs),
+    lipids = as.numeric(lipids),
+    protein = as.numeric(protein)
+  )
+
+head(family_df2)
+
+#Tests
+df_rumi <- family_df2 %>% filter(Family == "Ruminococcaceae")
+df_rike <- family_df2 %>% filter(Family == "Rikenellaceae")
+
+cor.test(df_rumi$RelAbundance, df_rumi$energy)
+cor.test(df_rike$RelAbundance, df_rike$energy)
+cor.test(df_rumi$Abundance, df_rumi$energy)
+cor.test(df_rike$Abundance, df_rike$energy)
