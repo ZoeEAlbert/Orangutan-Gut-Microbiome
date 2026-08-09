@@ -1,0 +1,268 @@
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(pheatmap)
+  library(stringr)
+})
+
+#Metadata
+GENUS_TSV <- "/projectnb/pongogp/zealbert/bibi_sandra_genus_L6.tsv"  # BIOM-converted TSV (has barcode_* sample IDs)
+META_TSV  <- "/projectnb/pongogp/zealbert/metadata_pregnancy_bibiandsandra_withdates.tsv"
+
+OUT_PREFIX <- "Top20_Genera_Heatmap_Bibi_vs_Sandra_FINAL_v2"
+
+TOPN   <- 20
+PSEUDO <- 1e-6
+
+BIBI_ID   <- "bibisu_01"
+SANDRA_ID <- "sandrasu_01"
+
+DROP_UNASSIGNED <- TRUE   # set FALSE if you want to keep Unassigned
+DROP_NUMERIC    <- TRUE   # drop taxa whose genus label is just a number
+
+EVENT_DAY <- NA_real_
+
+stopifnot(file.exists(GENUS_TSV), file.exists(META_TSV))
+
+#Extract genus name from QIIME taxonomy string
+extract_genus <- function(tax) {
+  tax <- as.character(tax)
+
+  g <- str_match(tax, "g__([^;]+)")[,2]
+  out <- ifelse(!is.na(g) & g != "", g, NA)
+
+  if (any(is.na(out))) {
+    last_rank <- sapply(strsplit(tax, ";"), function(parts) {
+      parts <- str_trim(parts)
+      parts <- parts[parts != ""]
+      if (length(parts) == 0) return(NA_character_)
+      last <- tail(parts, 1)
+      str_replace(last, "^[a-z]__", "")
+    })
+    out[is.na(out)] <- last_rank[is.na(out)]
+  }
+
+  out <- str_replace_all(out, "_", " ")
+  out <- str_squish(out)
+  out[is.na(out) | out == ""] <- "Unassigned"
+  out
+}
+
+#Z score
+row_zscore <- function(m) {
+  mu <- rowMeans(m, na.rm = TRUE)
+  sdv <- apply(m, 1, sd, na.rm = TRUE)
+  sdv[sdv == 0 | !is.finite(sdv)] <- NA_real_
+  z <- sweep(m, 1, mu, "-")
+  z <- sweep(z, 1, sdv, "/")
+  z[!is.finite(z)] <- 0
+  z
+}
+
+#Read genus table (BIOM-converted TSV)
+genus_raw <- read.table(
+  GENUS_TSV,
+  header = TRUE,
+  sep = "\t",
+  skip = 1,              
+  check.names = FALSE,
+  comment.char = ""
+)
+
+tax_col <- colnames(genus_raw)[1]
+tax_strings <- as.character(genus_raw[[tax_col]])
+rownames(genus_raw) <- tax_strings
+genus_raw <- genus_raw[, -1, drop = FALSE]
+
+genus_mat <- as.matrix(genus_raw)
+mode(genus_mat) <- "numeric"
+genus_mat <- genus_mat[, colSums(genus_mat, na.rm = TRUE) > 0, drop = FALSE]
+
+#Clean to genus name
+genus_names <- extract_genus(rownames(genus_mat))
+
+keep <- rep(TRUE, length(genus_names))
+
+if (DROP_NUMERIC) {
+  keep <- keep & !str_detect(genus_names, "^[0-9]+(\\.[0-9]+)?$")
+}
+if (DROP_UNASSIGNED) {
+  keep <- keep & genus_names != "Unassigned"
+}
+
+genus_mat <- genus_mat[keep, , drop = FALSE]
+genus_names <- genus_names[keep]
+rownames(genus_mat) <- make.unique(genus_names)
+
+#Relative abundance
+rel_abund <- sweep(genus_mat, 2, colSums(genus_mat), "/")
+
+#Pick top N overall
+mean_abund <- rowMeans(rel_abund, na.rm = TRUE)
+top_taxa <- names(sort(mean_abund, decreasing = TRUE))[1:min(TOPN, length(mean_abund))]
+rel_top <- rel_abund[top_taxa, , drop = FALSE]
+
+#log10 transform
+mat_log <- log10(rel_top + PSEUDO)
+
+#Row Z-score
+mat_plot <- row_zscore(mat_log)
+
+#Metadata align columnswil
+meta <- readr::read_tsv(META_TSV, show_col_types = FALSE) %>%
+  mutate(
+    `#SampleID` = as.character(`#SampleID`),
+    pregnancy_day = suppressWarnings(as.numeric(pregnancy_day)),
+    Phase = case_when(
+      Trimester == "New mom" ~ "Postpartum",
+      pregnancy_status == "complication" ~ "Complication",
+      TRUE ~ "Pregnant"
+    ),
+    Stage = case_when(
+      Trimester %in% c("First Trimester","Second Trimester","Third Trimester") ~ Trimester,
+      pregnancy_status == "complication" ~ "Complication",
+      Trimester == "New mom" ~ "Postpartum",
+      TRUE ~ "Unknown"
+    )
+  )
+
+common_ids <- intersect(meta$`#SampleID`, colnames(mat_plot))
+
+cat("\nMatrix samples:", ncol(mat_plot), "\n")
+cat("Metadata rows:", nrow(meta), "\n")
+cat("Common SampleIDs:", length(common_ids), "\n\n")
+
+if (length(common_ids) == 0) {
+  stop("No matching SampleIDs between metadata and genus table. Make sure GENUS_TSV is the BIOM-converted TSV with barcode_* sample IDs.")
+}
+
+meta2 <- meta %>%
+  filter(`#SampleID` %in% common_ids) %>%
+  arrange(subject_id, pregnancy_day)
+
+cat("Subjects in filtered metadata:\n")
+print(unique(meta2$subject_id))
+cat("\nSamples per subject:\n")
+print(table(meta2$subject_id))
+
+bibi_samples <- meta2 %>%
+  filter(subject_id == BIBI_ID) %>%
+  arrange(pregnancy_day) %>%
+  pull(`#SampleID`)
+
+sandra_samples <- meta2 %>%
+  filter(subject_id == SANDRA_ID) %>%
+  arrange(pregnancy_day) %>%
+  pull(`#SampleID`)
+
+stopifnot(length(bibi_samples) > 0)
+stopifnot(length(sandra_samples) > 0)
+
+#Build annotation dataframes (must match column order)
+anno_bibi <- meta2 %>%
+  filter(`#SampleID` %in% bibi_samples) %>%
+  arrange(pregnancy_day) %>%
+  select(`#SampleID`, pregnancy_day, Phase, Stage) %>%
+  mutate(pregnancy_day = round(pregnancy_day)) %>%
+  column_to_rownames("#SampleID")
+
+anno_sandra <- meta2 %>%
+  filter(`#SampleID` %in% sandra_samples) %>%
+  arrange(pregnancy_day) %>%
+  select(`#SampleID`, pregnancy_day, Phase, Stage) %>%
+  mutate(pregnancy_day = round(pregnancy_day)) %>%
+  column_to_rownames("#SampleID")
+
+mat_bibi   <- mat_plot[, rownames(anno_bibi), drop = FALSE]
+mat_sandra <- mat_plot[, rownames(anno_sandra), drop = FALSE]
+
+#Gap at event day
+make_gap <- function(anno_df, event_day) {
+  if (!is.finite(event_day)) return(NULL)
+  idx <- which(anno_df$pregnancy_day >= event_day)[1]
+  if (is.na(idx) || idx <= 1) return(NULL)
+  return(idx - 1)
+}
+
+gap_bibi   <- make_gap(anno_bibi, EVENT_DAY)
+gap_sandra <- make_gap(anno_sandra, EVENT_DAY)
+
+#Force Sandra to use Bibi row order
+p_bibi <- pheatmap(
+  mat_bibi,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  annotation_col = anno_bibi[, c("Phase","Stage"), drop = FALSE],
+  show_colnames = FALSE,
+  border_color = NA,
+  fontsize_row = 10,
+  main = "Bibi: Top 20 genera (row Z-score of log10 relative abundance)",
+  silent = TRUE
+)
+
+#Extract Bibi row order
+bibi_order <- rownames(mat_bibi)[p_bibi$tree_row$order]
+
+#Reorder both matrices
+mat_bibi_ordered   <- mat_bibi[bibi_order, , drop = FALSE]
+mat_sandra_ordered <- mat_sandra[bibi_order, , drop = FALSE]
+
+#Save Bibi heatmap
+png(paste0(OUT_PREFIX, "_Bibi.png"), width = 3600, height = 2000, res = 300)
+pheatmap(
+  mat_bibi_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = anno_bibi[, c("Phase","Stage"), drop = FALSE],
+  show_colnames = FALSE,
+  border_color = NA,
+  fontsize_row = 10,
+  main = "Bibi: Top 20 genera (row Z-score of log10 relative abundance)"
+)
+dev.off()
+
+#Sandra heatmap with same order of genera
+png(paste0(OUT_PREFIX, "_Sandra.png"), width = 3600, height = 2000, res = 300)
+pheatmap(
+  mat_sandra_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = anno_sandra[, c("Phase","Stage"), drop = FALSE],
+  show_colnames = FALSE,
+  border_color = NA,
+  fontsize_row = 10,
+  main = "Sandra: Top 20 genera (row Z-score of log10 relative abundance)"
+)
+dev.off()
+
+#Combined PDF
+pdf(paste0(OUT_PREFIX, ".pdf"), width = 12, height = 8.5)
+
+pheatmap(
+  mat_bibi_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = anno_bibi[, c("Phase","Stage"), drop = FALSE],
+  show_colnames = FALSE,
+  border_color = NA,
+  fontsize_row = 10,
+  main = "Bibi: Top 20 genera (row Z-score of log10 relative abundance)"
+)
+
+pheatmap(
+  mat_sandra_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = anno_sandra[, c("Phase","Stage"), drop = FALSE],
+  show_colnames = FALSE,
+  border_color = NA,
+  fontsize_row = 10,
+  main = "Sandra: Top 20 genera (row Z-score of log10 relative abundance)"
+)
+
+dev.off()
+
+cat("\nSandra now uses identical genus row order as Bibi.\n")
+
+
