@@ -1,1 +1,163 @@
+cd /projectnb/pongogp/zealbert
 
+cat > plot_pcoa_all_matching.R <<'RSCRIPT'
+suppressPackageStartupMessages(library(tidyverse))
+
+md_path  <- "metadata_pregnancy_bibiandsandra_FINAL.tsv"
+ord_path <- "braycurtis_pcoa_export/ordination.txt"
+stopifnot(file.exists(md_path), file.exists(ord_path))
+
+#Load metadata
+metadata <- readr::read_tsv(md_path, show_col_types = FALSE)
+stopifnot("#SampleID" %in% names(metadata),
+          "subject_id" %in% names(metadata),
+          "Trimester" %in% names(metadata))
+
+metadata <- metadata %>%
+  rename(sample_id = `#SampleID`) %>%
+  mutate(
+    sample_id  = as.character(sample_id),
+    subject_id = as.character(subject_id),
+    Stage      = as.character(Trimester)
+  )
+
+#Make stage a factor with ALL levels. Shapes and Legends should match across plots. 
+stage_levels <- c(
+  "Pre-pregnancy",
+  "First Trimester",
+  "Second Trimester",
+  "Third Trimester",
+  "Complication",
+  "New mom"
+)
+
+metadata <- metadata %>%
+  mutate(
+    Stage = if_else(is.na(Stage) | Stage == "", "Unknown", Stage),
+    Stage = factor(Stage, levels = c(stage_levels, "Unknown"))
+  )
+
+#Parse QIIME2 ordination.txt
+lines <- readLines(ord_path)
+site_header_idx <- grep("^\\s*Site\\b", lines)[1]
+stopifnot(!is.na(site_header_idx))
+
+header_line <- lines[site_header_idx + 1]
+data_lines  <- lines[(site_header_idx + 2):length(lines)]
+end_blank   <- which(trimws(data_lines) == "")[1]
+if (!is.na(end_blank)) data_lines <- data_lines[1:(end_blank - 1)]
+
+site_text <- paste(c(header_line, data_lines), collapse = "\n")
+pcoa <- readr::read_tsv(I(site_text), show_col_types = FALSE)
+
+stopifnot(ncol(pcoa) >= 3)
+sample_col <- names(pcoa)[1]
+axis1 <- names(pcoa)[2]
+axis2 <- names(pcoa)[3]
+
+pcoa2 <- pcoa %>%
+  rename(sample_id = all_of(sample_col)) %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    PC1 = as.numeric(.data[[axis1]]),
+    PC2 = as.numeric(.data[[axis2]])
+  ) %>%
+  left_join(metadata, by = "sample_id")
+
+stopifnot(nrow(pcoa2) > 0)
+
+#Fix points that were missing in my last attempt
+cat("\nCOUNTS (metadata):\n")
+print(metadata %>% count(subject_id) %>% arrange(desc(n)))
+
+cat("\nCOUNTS (pcoa2 after join):\n")
+print(pcoa2 %>% count(subject_id) %>% arrange(desc(n)))
+
+cat("\nMissing Stage labels after join:\n")
+print(table(is.na(pcoa2$Stage)))
+
+cat("\nSubjects present in pcoa2:\n")
+print(unique(pcoa2$subject_id))
+
+#If some samples are NA subject_id, that means they didn't match metadata
+na_samples <- pcoa2 %>% filter(is.na(subject_id)) %>% pull(sample_id)
+cat("\nUnmatched samples (first 10):\n")
+print(head(na_samples, 10))
+
+#Shared axis limits and fixed aspect ratio
+pad_range <- function(x, pad = 0.05) {
+  r <- range(x, na.rm = TRUE)
+  w <- diff(r)
+  if (w == 0) w <- 1
+  c(r[1] - pad*w, r[2] + pad*w)
+}
+xlims <- pad_range(pcoa2$PC1, 0.05)
+ylims <- pad_range(pcoa2$PC2, 0.05)
+
+#Consistent colors and shapes
+color_map <- c("bibisu_01" = "red", "sandrasu_01" = "blue")
+subject_labels <- c("bibisu_01" = "Bibi", "sandrasu_01" = "Sandra")
+
+shape_map <- c(
+  "Pre-pregnancy"   = 16, # filled circle
+  "First Trimester" = 17, # filled triangle
+  "Second Trimester"= 15, # filled square
+  "Third Trimester" = 3,  # plus
+  "Complication"    = 4,  # x
+  "Postpartum"         = 8,  # star
+  "Unknown"         = 1   # open circle
+)
+
+make_plot <- function(df, title_text, show_subject_legend = TRUE) {
+  ggplot(df, aes(PC1, PC2)) +
+    geom_point(
+      aes(color = subject_id, shape = Stage),
+      size = 3,
+      alpha = 0.9
+    ) +
+    scale_color_manual(values = color_map, labels = subject_labels, drop = FALSE) +
+    scale_shape_manual(values = shape_map, drop = FALSE) +
+    scale_x_continuous(limits = xlims) +
+    scale_y_continuous(limits = ylims) +
+    coord_fixed() +
+    theme_classic(base_size = 13) +
+    labs(
+      title = title_text,
+      x = "PC1",
+      y = "PC2",
+      color = if (show_subject_legend) "Subject" else NULL,
+      shape = "Stage"
+    ) +
+    guides(color = if (show_subject_legend) guide_legend() else "none")
+}
+
+#Combined plot Bibi and Sandra
+p_all <- make_plot(pcoa2 %>% filter(!is.na(subject_id)),
+                   "Bray-Curtis PCoA",
+                   show_subject_legend = TRUE)
+
+ggsave("braycurtis_pcoa_COMBINED_matching.png", p_all, width = 7.5, height = 6, dpi = 300)
+cat("WROTE:", file.path(getwd(), "braycurtis_pcoa_COMBINED_matching.png"), "\n")
+
+#Bibi only (same axes, same shapes)
+p_bibi <- make_plot(pcoa2 %>% filter(subject_id == "bibisu_01"),
+                    "Bray-Curtis PCoA — Bibi",
+                    show_subject_legend = FALSE) +
+  scale_color_manual(values = c("bibisu_01" = "red"), drop = FALSE)
+
+ggsave("braycurtis_pcoa_Bibi_matching.png", p_bibi, width = 7.5, height = 6, dpi = 300)
+cat("WROTE:", file.path(getwd(), "braycurtis_pcoa_Bibi_matching.png"), "\n")
+
+#Sandra only (same axes, same shapes)
+p_sandra <- make_plot(pcoa2 %>% filter(subject_id == "sandrasu_01"),
+                      "Bray-Curtis PCoA — Sandra",
+                      show_subject_legend = FALSE) +
+  scale_color_manual(values = c("sandrasu_01" = "blue"), drop = FALSE)
+
+ggsave("braycurtis_pcoa_Sandra_matching.png", p_sandra, width = 7.5, height = 6, dpi = 300)
+cat("WROTE:", file.path(getwd(), "braycurtis_pcoa_Sandra_matching.png"), "\n")
+
+RSCRIPT
+
+Rscript plot_pcoa_all_matching.R
+ls -lh braycurtis_pcoa_*matching*.png
