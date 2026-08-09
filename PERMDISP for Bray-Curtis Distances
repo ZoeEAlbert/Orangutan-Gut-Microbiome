@@ -1,0 +1,263 @@
+rm(list = ls())
+library(tidyverse)
+library(vegan)
+library(ggplot2)
+
+#Read metadata
+meta <- read.delim(
+  "/projectnb/pongogp/zealbert/Orangutan_Microbiome_Energetics_Merged.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Standardize names if needed
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+meta$Orangutan[meta$Orangutan == "UML06MAY24"] <- "Eli"
+
+#Clean metadata fields
+meta <- meta %>%
+  mutate(
+    Orangutan = trimws(Orangutan),
+    AgeSexClass = trimws(AgeSexClass),
+    Family = trimws(Family)
+  )
+
+#Fixed orangutan order. Same throughout all graphs. 
+desired_orangutan_order <- c(
+  "Alfred", "Balon", "Bilbo", "Dude", "Eli", "Obiwan", "Tunjuk",
+  "Bayas", "King", "Berani", "Bibi", "Kabar", "Sandra", "Tari", "Telur"
+)
+
+#Fixed age/sex class order
+desired_agesex_order <- c(
+  "Adult Female",
+  "Flanged Male",
+  "Juvenile Male",
+  "Unflanged Male"
+)
+
+#Read Bray-Curtis distance matrix exported from QIIME
+distmat <- read.delim(
+  "bray_export/distance-matrix.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+colnames(distmat)[1] <- "#SampleID"
+rownames(distmat) <- distmat$`#SampleID`
+
+#Keep only numeric values
+distmat_num <- distmat[, -1, drop = FALSE]
+
+#Make sure row and column order matches
+distmat_num <- as.data.frame(distmat_num)
+distmat_num <- distmat_num[, rownames(distmat_num), drop = FALSE]
+
+#Convert to matrix and distance object
+dist_matrix <- as.matrix(distmat_num)
+mode(dist_matrix) <- "numeric"
+bc_dist <- as.dist(dist_matrix)
+
+#Match metadata order to distance matrix
+meta <- meta %>%
+  filter(`#SampleID` %in% rownames(dist_matrix))
+
+meta <- meta[match(rownames(dist_matrix), meta$`#SampleID`), ]
+
+#Factor levels
+present_orangutans <- desired_orangutan_order[desired_orangutan_order %in% unique(meta$Orangutan)]
+meta$Orangutan <- factor(meta$Orangutan, levels = present_orangutans)
+
+meta$AgeSexClass <- factor(
+  meta$AgeSexClass,
+  levels = desired_agesex_order
+)
+
+#Family in alphabetical order
+meta$Family <- factor(meta$Family, levels = sort(unique(meta$Family)))
+
+#Theme
+pretty_theme <- theme_classic(base_size = 16) +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "none"
+  )
+
+#PERMDISP
+run_permdisp <- function(distance_obj, metadata, group_var, plot_title, out_prefix, group_order = NULL) {
+
+  #Keep only rows with non-missing grouping
+  keep <- !is.na(metadata[[group_var]]) & metadata[[group_var]] != ""
+  metadata_sub <- metadata[keep, , drop = FALSE]
+
+  #Subset distance matrix to same samples
+  ids <- metadata_sub$`#SampleID`
+  dist_mat <- as.matrix(distance_obj)
+  dist_sub <- as.dist(dist_mat[ids, ids])
+
+  #Group factor
+  grp <- metadata_sub[[group_var]]
+
+  if (!is.null(group_order)) {
+    present_levels <- group_order[group_order %in% unique(as.character(grp))]
+    grp <- factor(as.character(grp), levels = present_levels)
+  } else {
+    grp <- factor(grp)
+  }
+
+  #Betadisper
+  bd <- betadisper(dist_sub, grp, type = "centroid")
+
+  #Permutation test
+  perm <- permutest(bd, permutations = 999)
+
+  #Tukey pairwise test
+  tuk <- TukeyHSD(bd)
+
+  #Distances to centroid for plotting
+  plot_df <- data.frame(
+    SampleID = metadata_sub$`#SampleID`,
+    Group = grp,
+    DistanceToCentroid = bd$distances
+  )
+
+  #Preserve factor order exactly
+  if (!is.null(group_order)) {
+    present_levels <- group_order[group_order %in% unique(as.character(plot_df$Group))]
+    plot_df$Group <- factor(as.character(plot_df$Group), levels = present_levels)
+  } else {
+    plot_df$Group <- factor(plot_df$Group)
+  }
+
+  #Extract p and F
+  perm_tab <- as.data.frame(perm$tab)
+  pval <- perm_tab$`Pr(>F)`[1]
+  fval <- perm_tab$F[1]
+
+  #Plot
+  p <- ggplot(plot_df, aes(x = Group, y = DistanceToCentroid)) +
+    geom_boxplot(
+      fill = "grey75",
+      colour = "black",
+      width = 0.7,
+      outlier.shape = NA
+    ) +
+    geom_jitter(
+      width = 0.15,
+      size = 2.8,
+      alpha = 0.8
+    ) +
+    labs(
+      title = plot_title,
+      subtitle = paste0("PERMDISP: F = ", round(fval, 3), ", p = ", signif(pval, 3)),
+      x = group_var,
+      y = "Distance to centroid"
+    ) +
+    pretty_theme
+
+  print(p)
+
+  #Save the plots
+  ggsave(
+    paste0(out_prefix, ".png"),
+    plot = p,
+    width = 10,
+    height = 6,
+    dpi = 300,
+    bg = "white"
+  )
+
+  ggsave(
+    paste0(out_prefix, ".pdf"),
+    plot = p,
+    width = 10,
+    height = 6,
+    bg = "white"
+  )
+
+  #Save raw distances
+  write.table(
+    plot_df,
+    paste0(out_prefix, "_distances.tsv"),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+
+  #Save permutation results
+  capture.output(
+    perm,
+    file = paste0(out_prefix, "_permutest.txt")
+  )
+
+  #Save Tukey results
+  capture.output(
+    tuk,
+    file = paste0(out_prefix, "_TukeyHSD.txt")
+  )
+
+  cat("\n=====================================================\n")
+  cat("PERMDISP for", group_var, "\n")
+  cat("=====================================================\n")
+  print(perm)
+  cat("\nTukeyHSD pairwise comparisons:\n")
+  print(tuk)
+
+  return(list(
+    betadisper = bd,
+    permutest = perm,
+    tukey = tuk,
+    plot = p,
+    plot_df = plot_df
+  ))
+}
+
+#PERMDISP by individual orangutan (remove samples with <3)
+meta_orangutan <- meta %>%
+group_by(Orangutan) %>%
+filter(n() >= 3) %>%
+ungroup()
+
+cat("\nIndividuals retained for orangutan PERMDISP:\n")
+print(table(meta_orangutan$Orangutan))
+
+res_orangutan <- run_permdisp(
+  distance_obj = bc_dist,
+  metadata = meta,
+  group_var = "Orangutan",
+  plot_title = "Dispersion of Bray-Curtis Distances by Orangutan",
+  out_prefix = "permdisp_orangutan",
+  group_order = desired_orangutan_order
+)
+
+#PERMDISP by age/sex class
+res_agesex <- run_permdisp(
+  distance_obj = bc_dist,
+  metadata = meta,
+  group_var = "AgeSexClass",
+  plot_title = "Dispersion of Bray-Curtis Distances by Age/Sex Class",
+  out_prefix = "permdisp_agesexclass",
+  group_order = desired_agesex_order
+)
+
+#PERMDISP by family (remove samples with <3)
+meta_family <- meta %>%
+group_by(Orangutan) %>%
+filter(n() >= 3) %>% # removes Dude
+ungroup()
+
+run_permdisp(
+bc_dist,
+meta_family,
+"Family",
+"Dispersion of Bray-Curtis Distances by Family",
+"permdisp_family",
+levels(meta_family$Family)
+)
