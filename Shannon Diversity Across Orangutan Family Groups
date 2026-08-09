@@ -1,0 +1,165 @@
+rm(list = ls())
+library(tidyverse)
+library(ggplot2)
+library(vegan)
+
+#Load full Shannon diversity
+alpha <- read.delim(
+  "shannon_vector.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+colnames(alpha)[1] <- "SampleID"
+colnames(alpha)[2] <- "Shannon"
+
+#Load metadata
+meta <- read.delim(
+  "/projectnb/pongogp/zealbert/Orangutan_Microbiome_Energetics_Merged.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Rename IDs
+meta$Orangutan[meta$Orangutan == "UML06MAY24"] <- "Eli"
+meta$Family[meta$Family == "UML06MAY24_family"] <- "Eli_family"
+
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+meta$Family[meta$Family == "UML29APR24_family"] <- "Dude_family"
+
+meta$Family <- trimws(meta$Family)
+
+#Rebuild merged object
+alpha_meta <- left_join(alpha, meta, by = c("SampleID" = "#SampleID"))
+
+cat("Families after merge:\n")
+print(table(alpha_meta$Family, useNA = "ifany"))
+
+alpha_meta2 <- alpha_meta %>%
+  filter(!is.na(Family), Family != "")
+
+#Alphabetical order
+family_order <- sort(unique(alpha_meta2$Family))
+alpha_meta2$Family <- factor(alpha_meta2$Family, levels = family_order)
+
+cat("\nFamilies used in plot:\n")
+print(table(alpha_meta2$Family, useNA = "ifany"))
+
+#Kruskal-Wallis
+kw_test <- kruskal.test(Shannon ~ Family, data = alpha_meta2)
+
+print(kw_test)
+capture.output(kw_test, file = "kruskal_alpha_family.txt")
+
+p_label <- paste0("Kruskal-Wallis p = ", signif(kw_test$p.value, 3))
+
+#Colors
+family_colors <- c(
+  "Alfred_family" = "#F8766D",
+  "Bibi_family"   = "#C49A00",
+  "Dude_family"   = "#7CAE00",
+  "Eli_family"    = "#00BFC4",
+  "Kabar_family"  = "#00BA38",
+  "Obiwan_family" = "#F564E3",
+  "Sandra_family" = "#00B0F6",
+  "Tari_family"   = "#C77CFF",
+  "Tunjuk_family" = "#FF61C3"
+)
+
+family_colors <- family_colors[names(family_colors) %in% levels(alpha_meta2$Family)]
+
+#Plot
+pretty_theme <- theme_classic(base_size = 16) +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "none"
+  )
+
+p_family <- ggplot(
+  alpha_meta2,
+  aes(x = Family, y = Shannon, fill = Family)
+) +
+  geom_boxplot(
+    width = 0.6,
+    outlier.shape = NA,
+    alpha = 0.8
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 2.8,
+    alpha = 0.8
+  ) +
+  scale_fill_manual(values = family_colors) +
+  annotate(
+    "text",
+    x = min(4, length(levels(alpha_meta2$Family))),
+    y = max(alpha_meta2$Shannon, na.rm = TRUE) + 0.3,
+    label = p_label,
+    size = 5
+  ) +
+  labs(
+    title = "Shannon Diversity Across Orangutan Family Groups",
+    x = "Family Group",
+    y = "Shannon Diversity Index"
+  ) +
+  pretty_theme
+
+print(p_family)
+
+ggsave(
+  "alpha_shannon_family.png",
+  plot = p_family,
+  width = 11,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "alpha_shannon_family.pdf",
+  plot = p_family,
+  width = 11,
+  height = 6,
+  bg = "white"
+)
+
+#PERMANOVA by Family
+distmat <- read.delim(
+  "bray_export/distance-matrix.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+colnames(distmat)[1] <- "SampleID"
+
+dist_mat <- as.matrix(distmat[, -1])
+rownames(dist_mat) <- distmat$SampleID
+mode(dist_mat) <- "numeric"
+
+common_samples <- intersect(rownames(dist_mat), meta$`#SampleID`)
+dist_mat <- dist_mat[common_samples, common_samples]
+
+meta_sub <- meta %>%
+  filter(`#SampleID` %in% common_samples, !is.na(Family), Family != "") %>%
+  arrange(match(`#SampleID`, common_samples))
+
+meta_sub$Family <- factor(meta_sub$Family, levels = sort(unique(meta_sub$Family)))
+
+bray_dist <- as.dist(dist_mat)
+
+permanova <- adonis2(
+  bray_dist ~ Family,
+  data = meta_sub,
+  permutations = 999
+)
+
+print(permanova)
+capture.output(permanova, file = "permanova_family.txt")
