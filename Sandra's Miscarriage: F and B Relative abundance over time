@@ -1,0 +1,125 @@
+OUTDIR="sandra_preg_vs_postpartum"
+
+cat > "$OUTDIR/H3_phyla_over_time_2colors.R" <<'RSCRIPT'
+#!/usr/bin/env Rscript
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tidyr); library(stringr)
+  library(ggplot2); library(biomformat); library(scales)
+})
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 4) {
+  stop("Usage: Rscript H3_phyla_over_time_2colors.R <relfreq_biom> <taxonomy_tsv> <metadata_tsv> <out_prefix>")
+}
+
+biom_path  <- args[1]
+tax_path   <- args[2]
+meta_path  <- args[3]
+out_prefix <- args[4]
+
+meta_sample_col <- "#SampleID"
+meta_day_col    <- "pregnancy_day"
+
+#Read relfreq biom
+b <- read_biom(biom_path)
+mat <- as.matrix(biom_data(b))
+
+rel <- as.data.frame(mat) %>%
+  tibble::rownames_to_column("FeatureID") %>%
+  pivot_longer(-FeatureID, names_to="SampleID", values_to="RelAbund")
+
+#Read taxonomy
+tax <- read_tsv(tax_path, show_col_types = FALSE)
+
+feat_candidates <- c("Feature ID","FeatureID","feature-id","FeatureId","OTU ID","ASV ID")
+feat_col <- intersect(names(tax), feat_candidates)[1]
+if (is.na(feat_col)) feat_col <- names(tax)[1]
+
+tax_candidates <- c("Taxon","taxon","taxonomy","Taxonomy")
+tax_col <- intersect(names(tax), tax_candidates)[1]
+if (is.na(tax_col)) {
+  if (ncol(tax) < 2) stop("taxonomy.tsv has <2 columns; cannot find taxonomy strings")
+  tax_col <- names(tax)[2]
+}
+
+tax2 <- tax %>%
+  rename(FeatureID = all_of(feat_col),
+         Taxon     = all_of(tax_col)) %>%
+  mutate(
+    Phylum = str_match(Taxon, "p__([^;]+)")[,2],
+    Phylum = ifelse(is.na(Phylum) | Phylum=="", NA_character_, Phylum)
+  ) %>%
+  select(FeatureID, Phylum)
+
+#Read metadata and define stage
+meta <- read_tsv(meta_path, show_col_types = FALSE)
+if (!meta_sample_col %in% names(meta)) stop(paste("Metadata missing:", meta_sample_col))
+if (!"Trimester" %in% names(meta)) stop("Metadata missing: Trimester")
+if (!meta_day_col %in% names(meta)) stop(paste("Metadata missing:", meta_day_col))
+
+meta2 <- meta %>%
+  rename(SampleID = all_of(meta_sample_col),
+         PregnancyDay = all_of(meta_day_col)) %>%
+  mutate(
+    PregnancyDay = as.numeric(PregnancyDay),
+    Stage = ifelse(Trimester == "New mom", "Postpartum", "Pregnancy"),
+    Stage = factor(Stage, levels=c("Pregnancy","Postpartum"))
+  )
+
+#Summarize
+phy <- rel %>%
+  left_join(tax2, by="FeatureID") %>%
+  filter(!is.na(Phylum)) %>%
+  mutate(
+    Phylum2 = case_when(
+      tolower(Phylum) %in% tolower(c("Firmicutes","Bacillota")) ~ "Firmicutes",
+      tolower(Phylum) %in% tolower(c("Bacteroidota","Bacteroidetes")) ~ "Bacteroidota",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Phylum2)) %>%
+  group_by(SampleID, Phylum2) %>%
+  summarise(RelAbund = sum(RelAbund), .groups="drop") %>%
+  left_join(meta2, by="SampleID") %>%
+  filter(!is.na(PregnancyDay)) %>%
+  arrange(PregnancyDay)
+
+#Birth marker between last pregnancy and first postpartum sample
+max_preg <- suppressWarnings(max(phy$PregnancyDay[phy$Stage=="Pregnancy"], na.rm=TRUE))
+min_post <- suppressWarnings(min(phy$PregnancyDay[phy$Stage=="Postpartum"], na.rm=TRUE))
+birth_marker <- if (is.finite(max_preg) && is.finite(min_post)) (max_preg + min_post)/2 else NA_real_
+
+#Plot: two colored lines/points, percent y-axis
+p <- ggplot(phy, aes(PregnancyDay, RelAbund, color=Phylum2, shape=Stage, group=Phylum2)) +
+  geom_point(size=2) +
+  geom_line(alpha=0.7) +
+  theme_bw() +
+  scale_y_continuous(labels=percent_format(accuracy=1), limits=c(0,1)) +
+  labs(
+    title="Sandra: Firmicutes and Bacteroidota relative abundance over time",
+    subtitle="Two phyla shown; shapes indicate Pregnancy vs Postpartum",
+    x="Pregnancy day",
+    y="Relative abundance"
+  )
+
+if (is.finite(birth_marker)) {
+  p <- p +
+    geom_vline(xintercept=birth_marker, linetype="dashed") +
+    annotate("text", x=birth_marker, y=1,
+             label="Birth\n(between samples)", vjust=-0.3, hjust=0.5, size=3)
+}
+
+ggsave(paste0(out_prefix, "_2phyla_over_time.png"), p, width=9, height=4.8, dpi=300)
+ggsave(paste0(out_prefix, "_2phyla_over_time.pdf"), p, width=9, height=4.8)
+
+write_csv(phy, paste0(out_prefix, "_2phyla_over_time_data.csv"))
+RSCRIPT
+
+chmod +x "$OUTDIR/H3_phyla_over_time_2colors.R"
+
+Rscript "$OUTDIR/H3_phyla_over_time_2colors.R" \
+  "$OUTDIR/relfreq_export/feature-table.biom" \
+  "$OUTDIR/tax_export/taxonomy.tsv" \
+  "$OUTDIR/metadata_sandra_preg_post.tsv" \
+  "$OUTDIR/H3_Sandra_Firm_Bact"
+
