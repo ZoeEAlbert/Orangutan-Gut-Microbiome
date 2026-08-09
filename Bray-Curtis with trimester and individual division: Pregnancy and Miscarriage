@@ -1,0 +1,119 @@
+cd /projectnb/pongogp/zealbert
+
+#Build barcode-matched metadata with trimester labels
+python - <<'PY'
+import pandas as pd
+
+trim = pd.read_csv("metadata_pregnancy_bibiandsandra_trimester.tsv", sep="\t", dtype=str)
+bar  = pd.read_csv("metadata_pregnancy_bibiandsandra_barcode.tsv", sep="\t", dtype=str)
+
+trim = trim.rename(columns={"#SampleID":"plain_id"})
+bar  = bar.rename(columns={"#SampleID":"barcode_id"})
+
+bar["plain_id"] = bar["barcode_id"].str.replace("^barcode_","", regex=True)
+
+assert "Trimester" in trim.columns, "ERROR: 'Trimester' column not found in trimester metadata"
+trim2 = trim[["plain_id","Trimester"]].drop_duplicates()
+
+merged = bar.merge(trim2, on="plain_id", how="left")
+merged = merged.rename(columns={"barcode_id":"#SampleID"})
+
+merged.to_csv("metadata_pregnancy_bibiandsandra_FINAL.tsv", sep="\t", index=False)
+
+print("WROTE: metadata_pregnancy_bibiandsandra_FINAL.tsv")
+print("Rows:", len(merged))
+print("Missing Trimester:", merged["Trimester"].isna().sum())
+print("Subjects:", merged["subject_id"].unique())
+PY
+
+#Make the plot (color = subject, shape = stage)
+cat > plot_pcoa_subject_trimester_from_metadata.R <<'RSCRIPT'
+suppressPackageStartupMessages(library(tidyverse))
+
+md_path  <- "metadata_pregnancy_bibiandsandra_FINAL.tsv"
+ord_path <- "braycurtis_pcoa_export/ordination.txt"
+stopifnot(file.exists(md_path), file.exists(ord_path))
+
+#Input metadata
+metadata <- readr::read_tsv(md_path, show_col_types = FALSE)
+stopifnot("#SampleID" %in% names(metadata), "subject_id" %in% names(metadata), "Trimester" %in% names(metadata))
+
+metadata <- metadata %>%
+  rename(sample_id = `#SampleID`) %>%
+  mutate(
+    sample_id = as.character(sample_id),
+    subject_id = as.character(subject_id),
+    Trimester  = as.character(Trimester)
+  )
+
+#QIIME2
+lines <- readLines(ord_path)
+site_header_idx <- grep("^\\s*Site\\b", lines)[1]
+stopifnot(!is.na(site_header_idx))
+
+header_line <- lines[site_header_idx + 1]
+data_lines <- lines[(site_header_idx + 2):length(lines)]
+end_blank <- which(trimws(data_lines) == "")[1]
+if (!is.na(end_blank)) data_lines <- data_lines[1:(end_blank - 1)]
+
+site_text <- paste(c(header_line, data_lines), collapse = "\n")
+pcoa <- readr::read_tsv(I(site_text), show_col_types = FALSE)
+
+stopifnot(ncol(pcoa) >= 3)
+sample_col <- names(pcoa)[1]
+axis1 <- names(pcoa)[2]
+axis2 <- names(pcoa)[3]
+
+pcoa2 <- pcoa %>%
+  rename(sample_id = all_of(sample_col)) %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    PC1 = as.numeric(.data[[axis1]]),
+    PC2 = as.numeric(.data[[axis2]])
+  ) %>%
+  left_join(metadata, by = "sample_id")
+
+stopifnot(nrow(pcoa2) > 0)
+
+#Order
+desired_order <- c(
+  "Pre-pregnancy",
+  "First Trimester",
+  "Second Trimester",
+  "Third Trimester",
+  "Complication",
+  "Postpartum"
+)
+
+pcoa2 <- pcoa2 %>%
+  mutate(
+    Trimester = if_else(is.na(Trimester) | Trimester == "", "Unknown", Trimester),
+    Trimester = factor(Trimester, levels = c(desired_order, "Unknown"))
+  )
+
+#Zoom to keep plot readable
+xlims <- quantile(pcoa2$PC1, c(0.02, 0.98), na.rm = TRUE)
+ylims <- quantile(pcoa2$PC2, c(0.02, 0.98), na.rm = TRUE)
+
+#Plot
+p <- ggplot(pcoa2, aes(PC1, PC2)) +
+  geom_point(aes(shape = Trimester, color = subject_id), size = 3, alpha = 0.9) +
+  coord_cartesian(xlim = xlims, ylim = ylims) +
+  scale_color_manual(
+    values = c("bibisu_01" = "red", "sandrasu_01" = "blue"),
+    labels = c("bibisu_01" = "Bibi", "sandrasu_01" = "Sandra")
+  ) +
+  theme_classic(base_size = 13) +
+  labs(
+    title = "Bray-Curtis PCoA",
+    x = "PC1", y = "PC2",
+    shape = "Stage",
+    color = "Subject"
+  )
+
+ggsave("braycurtis_pcoa_subject_trimester.png", p, width = 7, height = 6, dpi = 300)
+cat("WROTE:", file.path(getwd(), "braycurtis_pcoa_subject_trimester.png"), "\n")
+RSCRIPT
+
+Rscript plot_pcoa_subject_trimester_from_metadata.R
+ls -lh braycurtis_pcoa_subject_trimester.png
