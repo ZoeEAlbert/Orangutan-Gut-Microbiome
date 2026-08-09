@@ -1,0 +1,72 @@
+library(tidyverse)
+
+#Read pairwise orangutan distances
+pairs <- read.delim("orangutan_pairwise_mean_braycurtis.tsv", sep = "\t", header = TRUE)
+
+#Unique orangutan names
+orangutans <- sort(unique(c(pairs$Orangutan1, pairs$Orangutan2)))
+
+#Initialize distance matrix
+n <- length(orangutans)
+dist_mat <- matrix(0, nrow = n, ncol = n)
+rownames(dist_mat) <- orangutans
+colnames(dist_mat) <- orangutans
+
+#Fill the matrix
+for (i in 1:nrow(pairs)) {
+  o1 <- pairs$Orangutan1[i]
+  o2 <- pairs$Orangutan2[i]
+  d  <- pairs$mean_distance[i]
+  dist_mat[o1, o2] <- d
+  dist_mat[o2, o1] <- d
+}
+
+#Convert to dist object
+dist_obj <- as.dist(dist_mat)
+
+#Hierarchical clustering
+hc <- hclust(dist_obj, method = "average")  # UPGMA
+
+#Plot dendrogram
+png("orangutan_microbiome_dendrogram.png", width = 1200, height = 900, res = 150)
+plot(hc,
+     main = "Orangutan Microbiome Similarity Dendrogram",
+     sub = "Clustering based on Bray–Curtis distances",
+     xlab = "",
+     ylab = "Bray–Curtis distance",
+     cex = 1.2)
+dev.off()
+
+pdf("orangutan_microbiome_dendrogram.pdf", width = 8, height = 6)
+plot(hc,
+     main = "Orangutan Microbiome Similarity Dendrogram",
+     sub = "Clustering based on Bray–Curtis distances",
+     xlab = "",
+     ylab = "Bray–Curtis distance",
+     cex = 1.2)
+dev.off()
+
+#Save clustering order
+write.table(data.frame(Orangutan = hc$labels[hc$order]),
+            "orangutan_dendrogram_order.tsv",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+cat("Dendrogram created.\n")
+
+#Stat: cophenetic correlation
+cophen <- cophenetic(hc)
+coph_cor <- cor(dist_obj, cophen)
+
+cat("Cophenetic correlation =", round(coph_cor, 3), "\n")
+
+#Save stat
+write.table(
+  data.frame(
+    statistic = "cophenetic_correlation",
+    value = coph_cor
+  ),
+  "orangutan_dendrogram_stats.tsv",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
