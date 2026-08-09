@@ -1,3 +1,6 @@
+##########################################
+#Genus-level Shannon diversity by preservation buffer
+##########################################
 suppressPackageStartupMessages({
   library(readr)
   library(dplyr)
@@ -45,6 +48,7 @@ df_sum <- df %>%
   summarise(Shannon = mean(Shannon, na.rm = TRUE), .groups = "drop")
 
 #Plot
+#Each point represents one biological sample. Grey lines connect paired samples.
 p <- ggplot(df_sum, aes(x = buffer, y = Shannon, group = triplicate_set)) +
   geom_line(color = "grey70", linewidth = 0.6, alpha = 0.9) +
   geom_point(aes(color = buffer), size = 2.5, alpha = 0.9) +
