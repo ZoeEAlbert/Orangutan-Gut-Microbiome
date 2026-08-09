@@ -1,0 +1,150 @@
+rm(list = ls())
+
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+
+#Read Metadata
+meta <- read.delim(
+  "AgeSexClass_metadata.txt",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Rename orangutan’s with date names
+meta$Orangutan[meta$Orangutan == "UML06MAY24"] <- "Eli"
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+
+#Read Shannon Diversity
+shannon <- read.delim(
+  "shannon_vector.tsv",
+  sep = "\t",
+  header = TRUE,
+  comment.char = ""
+)
+
+#Rename columns
+colnames(shannon)[1] <- "#SampleID"
+colnames(shannon)[2] <- "Shannon"
+
+#Merge Shannon and Metadata
+plot_df <- shannon %>%
+  left_join(meta, by = "#SampleID")
+
+#Fix date column
+plot_df <- plot_df %>%
+  mutate(Collection_Date = mdy(Collection_Date))
+
+#Remove missing values
+plot_df <- plot_df %>%
+  filter(
+    !is.na(Shannon),
+    !is.na(Collection_Date),
+    !is.na(Orangutan)
+  )
+
+#Sort by date
+plot_df <- plot_df %>%
+  arrange(Orangutan, Collection_Date)
+
+#Set orangutan order
+plot_df$Orangutan <- factor(
+  plot_df$Orangutan,
+  levels = sort(unique(plot_df$Orangutan))
+)
+
+#Top panel: all individuals together
+p_all <- ggplot(
+  plot_df,
+  aes(
+    x = Collection_Date,
+    y = Shannon,
+    color = Orangutan
+  )
+) +
+  geom_point(size = 2.2, alpha = 0.7) +
+  geom_smooth(
+    aes(group = 1),
+    method = "loess",
+    se = TRUE,
+    color = "black",
+    linewidth = 1.2
+  ) +
+  labs(
+    title = "Shannon Diversity Over Time Across All Individual Orangutans",
+    x = "Collection Date",
+    y = "Shannon Diversity",
+    color = "Orangutan"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+#Bottom panel: faceted by individual
+p_facet <- ggplot(
+  plot_df,
+  aes(
+    x = Collection_Date,
+    y = Shannon,
+    group = Orangutan,
+    color = Orangutan
+  )
+) +
+  geom_line(linewidth = 0.8, alpha = 0.9) +
+  geom_point(size = 2.2, alpha = 0.95) +
+  facet_wrap(~ Orangutan, scales = "free_x") +
+  labs(
+    title = "Shannon Diversity Over Time by Individual Orangutan",
+    x = "Collection Date",
+    y = "Shannon Diversity"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    strip.text = element_text(face = "bold", size = 11),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    panel.grid.minor = element_blank()
+  )
+
+#Combine into one figure
+final_plot <- p_all / p_facet +
+  plot_layout(heights = c(1, 2))
+
+print(final_plot)
+
+#Save combined figure
+ggsave(
+  "shannon_diversity_over_time_combined.png",
+  plot = final_plot,
+  width = 14,
+  height = 13,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "shannon_diversity_over_time_combined.pdf",
+  plot = final_plot,
+  width = 14,
+  height = 13,
+  bg = "white"
+)
+
+#Stats
+library(nlme)
+
+model_time <- lme(
+  Shannon ~ Collection_Date,
+  random = ~1 | Orangutan,
+  data = plot_df,
+  method = "REML"
+)
+
+summary(model_time)
+anova(model_time)
