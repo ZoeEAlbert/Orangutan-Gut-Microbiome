@@ -1,0 +1,97 @@
+library(tidyverse)
+library(vegan)
+library(ggplot2)
+library(viridis)
+
+#Read metadata
+meta <- read.delim("AgeSexClass_metadata.txt",
+                   sep = "\t",
+                   header = TRUE,
+                   check.names = FALSE)
+
+#Read Bray-Curtis distance matrix
+distmat <- read.delim("bray_export/distance-matrix.tsv",
+                      sep = "\t",
+                      header = TRUE,
+                      check.names = FALSE)
+
+colnames(distmat)[1] <- "#SampleID"
+
+#Convert matrix to dist object
+rownames(distmat) <- distmat$`#SampleID`
+distmat_num <- distmat[, -1]
+
+bc_dist <- as.dist(distmat_num)
+
+#Match metadata to distance matrix order
+meta <- meta %>%
+  filter(`#SampleID` %in% rownames(distmat_num))
+
+meta <- meta[match(rownames(distmat_num), meta$`#SampleID`), ]
+
+#Make sure Age is numeric
+meta$Age <- as.numeric(meta$Age)
+
+#Check
+head(meta[, c("#SampleID", "Orangutan", "Age")])
+
+#PERMANOVA by age
+age_perm <- adonis2(bc_dist ~ Age,
+                    data = meta,
+                    permutations = 999)
+
+print(age_perm)
+capture.output(age_perm, file = "permanova_age.txt")
+
+#PCoA
+pcoa <- cmdscale(bc_dist, k = 2, eig = TRUE)
+pcoa_df <- data.frame(
+  SampleID = rownames(pcoa$points),
+  PC1 = pcoa$points[, 1],
+  PC2 = pcoa$points[, 2]
+)
+
+#Merge metadata
+pcoa_df <- left_join(pcoa_df, meta, by = c("SampleID" = "#SampleID"))
+
+#Percent variance explained
+eig_vals <- pcoa$eig
+percent_var <- round(100 * eig_vals / sum(eig_vals[eig_vals > 0]), 1)
+
+pc1_lab <- paste0("PCoA Axis 1 (", percent_var[1], "%)")
+pc2_lab <- paste0("PCoA Axis 2 (", percent_var[2], "%)")
+
+#Clean publication theme
+pretty_theme <- theme_classic(base_size = 16) +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+#PCoA plot colored by age (cividis = color-blind friendly)
+p_age_beta <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Age)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_viridis_c(option = "cividis") +
+  labs(
+    title = "PCoA of Bray-Curtis Distances Colored by Age",
+    x = pc1_lab,
+    y = pc2_lab,
+    color = "Age"
+  ) +
+  pretty_theme
+
+print(p_age_beta)
+
+ggsave("pcoa_braycurtis_age_cividis.png",
+       plot = p_age_beta,
+       width = 8,
+       height = 6,
+       dpi = 300,
+       bg = "white")
+
+#Print result clearly
+cat("\nPERMANOVA by age:\n")
+print(age_perm)
