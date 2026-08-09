@@ -1,0 +1,172 @@
+#Install packages
+install.packages("patchwork")
+library(patchwork)
+library(tidyverse)
+library(ggplot2)
+
+#Plot functions with panel titles 
+plot_fb_scatter_log <- function(data, x_var, panel_title, x_label) {
+  ggplot(data, aes(x = .data[[x_var]], y = log_FB_ratio)) +
+    geom_point(size = 2.5, alpha = 0.8) +
+    geom_smooth(method = "lm", se = TRUE) +
+    labs(
+      title = panel_title,
+      x = x_label,
+      y = "log10(F:B ratio)"
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9)
+    )
+}
+
+#Make the five panels 
+p_energy <- plot_fb_scatter_log(
+  fb_meta, energy_col,
+  "A. Energy",
+  "Total Energy (kcal)"
+)
+
+p_ndf <- plot_fb_scatter_log(
+  fb_meta, ndf_col,
+  "B. NDF",
+  "NDF (g)"
+)
+
+p_carb <- plot_fb_scatter_log(
+  fb_meta, carb_col,
+  "C. Carbohydrates",
+  "Carbohydrates (g)"
+)
+
+p_lipid <- plot_fb_scatter_log(
+  fb_meta, lipid_col,
+  "D. Lipids",
+  "Lipids (g)"
+)
+
+p_protein <- plot_fb_scatter_log(
+  fb_meta, protein_col,
+  "E. Protein",
+  "Protein (g)"
+)
+
+#Combine into one figure
+fb_panel <- (p_energy | p_ndf | p_carb) / (p_lipid | p_protein | plot_spacer())
+
+Fb_panel
+
+#Save
+ggsave("FB_ratio_macronutrient_panel.png",
+       fb_panel,
+       width = 12,
+       height = 8,
+       dpi = 300)
+
+#Stats
+lm_energy  <- lm(log_FB_ratio ~ fb_meta[[energy_col]], data = fb_meta)
+lm_ndf     <- lm(log_FB_ratio ~ fb_meta[[ndf_col]], data = fb_meta)
+lm_carb    <- lm(log_FB_ratio ~ fb_meta[[carb_col]], data = fb_meta)
+lm_lipid   <- lm(log_FB_ratio ~ fb_meta[[lipid_col]], data = fb_meta)
+lm_protein <- lm(log_FB_ratio ~ fb_meta[[protein_col]], data = fb_meta)
+
+#Stat summaries
+get_stats <- function(model) {
+s <- summary(model)
+r2 <- round(s$r.squared, 3)
+p <- s$coefficients[2, 4]
+
+if (p < 0.001) {
+paste0("italic(R)^2 == ", r2, "*','~~italic(p) < 0.001")
+} else {
+paste0("italic(R)^2 == ", r2, "*','~~italic(p) == ", signif(p, 3))
+}
+}
+
+stats_energy <- get_stats(lm_energy)
+stats_ndf <- get_stats(lm_ndf)
+stats_carb <- get_stats(lm_carb)
+stats_lipid <- get_stats(lm_lipid)
+stats_protein <- get_stats(lm_protein)
+
+#Y axis limits
+ymin <- min(fb_meta$log_FB_ratio, na.rm = TRUE)
+ymax <- max(fb_meta$log_FB_ratio, na.rm = TRUE)
+
+#Add statistics to plots 
+plot_fb_scatter_log <- function(data, x_var, panel_title, x_label, stat_text) {
+ggplot(data, aes(x = .data[[x_var]], y = log_FB_ratio)) +
+geom_point(size = 2.5, alpha = 0.8) +
+geom_smooth(method = "lm", se = TRUE) +
+annotate("text",
+x = Inf, y = Inf,
+label = stat_text,
+hjust = 1.05, vjust = 1.2,
+size = 3.5,
+parse = TRUE) +
+labs(
+title = panel_title,
+x = x_label,
+y = "log10(F:B ratio)"
+) +
+coord_cartesian(ylim = c(ymin, ymax)) +
+theme_classic(base_size = 12) +
+theme(
+plot.title = element_text(face = "bold", size = 11),
+axis.title = element_text(size = 10),
+axis.text = element_text(size = 9),
+plot.background = element_rect(fill = "white", color = NA),
+panel.background = element_rect(fill = "white", color = NA)
+)
+}
+
+#Rebuild the plots with statistics added
+p_energy <- plot_fb_scatter_log(
+fb_meta, energy_col,
+"A. Energy", "Total Energy (kcal)",
+stats_energy
+)
+
+p_ndf <- plot_fb_scatter_log(
+fb_meta, ndf_col,
+"B. NDF", "NDF (g)",
+stats_ndf
+)
+
+p_carb <- plot_fb_scatter_log(
+fb_meta, carb_col,
+"C. Carbohydrates", "Carbohydrates (g)",
+stats_carb
+)
+
+p_lipid <- plot_fb_scatter_log(
+fb_meta, lipid_col,
+"D. Lipids", "Lipids (g)",
+stats_lipid
+)
+
+p_protein <- plot_fb_scatter_log(
+fb_meta, protein_col,
+"E. Protein", "Protein (g)",
+stats_protein
+)
+
+#Combine
+fb_panel <- (p_energy | p_ndf | p_carb) /
+(p_lipid | p_protein | patchwork::plot_spacer()) +
+plot_annotation(
+theme = theme(
+plot.background = element_rect(fill = "white", color = NA)
+)
+)
+fb_panel
+
+#Save
+ggsave("FB_ratio_macronutrient_panel_with_stats_clean.png",
+fb_panel,
+width = 12,
+height = 8,
+dpi = 300,
+bg = "white")
