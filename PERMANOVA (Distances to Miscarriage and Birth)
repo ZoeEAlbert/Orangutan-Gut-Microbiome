@@ -1,0 +1,66 @@
+#In bash
+qiime diversity beta-group-significance \
+  --i-distance-matrix braycurtis_bibi_sandra.qza \
+  --m-metadata-file metadata_pregnancy_bibiandsandra_barcode.tsv \
+  --m-metadata-column outcome \
+  --p-method permanova \
+  --p-permutations 999 \
+  --p-pairwise \
+  --o-visualization braycurtis_outcome_permanova.qzv
+
+#Export the Bray-Curtis distance matrix
+qiime tools export \
+  --input-path braycurtis_bibi_sandra.qza \
+  --output-path braycurtis_export
+
+#In R
+library(vegan)
+library(tidyverse)
+
+#Load and read metadata
+meta <- read.delim(
+  "metadata_pregnancy_bibiandsandra_barcode.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE, 
+  comment.char = "",
+  quote = "",
+  stringsAsFactors = FALSE,
+)
+
+#Set names of rows
+rownames(meta) <- meta[["sample-id"]]
+
+#Define variables
+meta$outcome <- as.factor(meta$outcome)
+meta$individual <- as.factor(meta$subject_id)
+
+#Load Bray-Curtis
+bray <- read.table(
+  "braycurtis_export/distance-matrix.tsv",
+  header = TRUE,
+  row.names = 1,
+  check.names = FALSE,
+  sep = "\t"
+)
+
+#Convert to distance
+bray_dist <- as.dist(bray)
+
+#Keep shared samples/subset 
+shared <- intersect(rownames(meta), labels(bray_dist))
+length(shared)
+
+meta_sub <- meta[shared, , drop = FALSE]
+bray_mat <- as.matrix(bray_dist)
+bray_sub <- as.dist(bray_mat[shared, shared])
+
+#Run adonis (PERMANOVA)
+adonis_out <- adonis2(
+  bray_sub ~ outcome,
+  data = meta_sub,
+  permutations = 999,
+  strata = meta_sub$individual
+)
+
+Adonis_out
