@@ -1,0 +1,149 @@
+#Option 1: Over Time
+#In R
+library(ggplot2)
+
+ggplot(df_individual, aes(x = timepoint, y = Shannon, group = individual_id)) +
+  geom_line() +
+  geom_point(size = 3) +
+  theme_bw() +
+  labs(
+    x = "Time",
+    y = "Shannon diversity",
+    title = "Within-individual change in gut microbiome diversity"
+  )
+
+#Option 2: Alpha diversity and linear model 
+#Set up environment
+module purge
+module load miniconda
+conda activate qiime2-amplicon-2025.4
+hash -r
+
+cd /projectnb/pongogp/zealbert
+
+#Check for wrong/missing data
+ls -lh feature-table.qza taxonomy.qza metadata_sandrasubset.tsv
+
+qiime tools peek feature-table.qza | sed -n '1,12p'
+qiime tools peek taxonomy.qza | sed -n '1,12p'
+
+#Metadata to QIIME2
+awk 'BEGIN{FS=OFS="\t"} NR==1{gsub(/^#SampleID$/,"sample-id",$1); print; next} {print}' \
+  metadata_sandrasubset.tsv > metadata_qiime.tsv
+
+head -n 2 metadata_qiime.tsv
+
+#Calculate Shannon
+qiime diversity alpha \
+  --i-table feature-table.qza \
+  --p-metric shannon \
+  --o-alpha-diversity shannon.qza
+
+#Export Shannon
+qiime tools export \
+  --input-path shannon.qza \
+  --output-path shannon_export
+
+#Run linear and segmented models
+cat > alpha_models.R << 'EOF'
+library(tidyverse)
+library(segmented)
+
+shannon <- read_tsv("shannon_export/alpha-diversity.tsv",
+                    col_names = c("sample-id","shannon"),
+                    show_col_types = FALSE)
+
+meta <- read_tsv("metadata_qiime.tsv", show_col_types = FALSE)
+
+df <- left_join(shannon, meta, by="sample-id") %>%
+  mutate(days_since_first_sample = as.numeric(days_since_first_sample)) %>%
+  drop_na(days_since_first_sample, shannon)
+
+#Linear model
+lm_fit <- lm(shannon ~ days_since_first_sample, data=df)
+sink("linear_model_summary.txt"); print(summary(lm_fit)); sink()
+
+#Segmented regression
+seg_fit <- tryCatch(
+  segmented(lm_fit, seg.Z = ~days_since_first_sample,
+            psi = median(df$days_since_first_sample, na.rm=TRUE)),
+  error = function(e) e
+)
+
+sink("segmented_model_summary.txt")
+if (inherits(seg_fit, "error")) {
+  cat("SEGMENTED FAILED:\n")
+  cat(seg_fit$message, "\n")
+} else {
+  print(summary(seg_fit))
+}
+sink()
+
+#Plot: data and linear
+png("shannon_linear.png", width=1800, height=1200, res=300)
+plot(df$days_since_first_sample, df$shannon, pch=16,
+     xlab="Days since first sample", ylab="Shannon diversity",
+     main="Shannon diversity over time (linear fit)")
+abline(lm_fit)
+dev.off()
+
+#Plot: data and segmented
+png("shannon_segmented.png", width=1800, height=1200, res=300)
+plot(df$days_since_first_sample, df$shannon, pch=16,
+     xlab="Days since first sample", ylab="Shannon diversity",
+     main="Shannon diversity over time (segmented regression)")
+if (!inherits(seg_fit, "error")) plot(seg_fit, add=TRUE)
+dev.off()
+
+write_csv(df, "shannon_with_metadata.csv")
+EOF
+
+Rscript alpha_models.R
+
+cat > ancombc_time.R << 'EOF'
+library(qiime2R)
+library(phyloseq)
+library(ANCOMBC)
+library(tidyverse)
+
+ps <- qza_to_phyloseq(
+  features = "feature-table.qza",
+  taxonomy = "taxonomy.qza",
+  metadata = "metadata_qiime.tsv"
+)
+
+ps <- prune_taxa(taxa_sums(ps) > 0, ps)
+
+sample_data(ps)$days_since_first_sample <- as.numeric(sample_data(ps)$days_since_first_sample)
+
+out <- ancombc2(
+  data         = ps,
+  tax_level    = "Genus",
+  fix_formula  = "days_since_first_sample",
+  rand_formula = NULL,
+  p_adj_method = "BH",
+  prv_cut      = 0.10,
+  lib_cut      = 0,
+  struc_zero   = FALSE,
+  neg_lb       = FALSE,
+  global       = FALSE,
+  pairwise     = FALSE,
+  dunnet       = FALSE,
+  trend        = FALSE,
+  verbose      = TRUE
+)
+
+res <- out$res %>%
+  as_tibble() %>%
+  arrange(q_days_since_first_sample)
+
+write_csv(res, "ancombc2_genus_time.csv")
+
+sig <- res %>%
+  filter(!is.na(q_days_since_first_sample),
+         q_days_since_first_sample < 0.05)
+
+write_csv(sig, "ancombc2_genus_time_FDR05.csv")
+EOF
+
+Rscript ancombc_time.R
