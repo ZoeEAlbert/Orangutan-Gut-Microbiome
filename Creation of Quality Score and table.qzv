@@ -1,0 +1,87 @@
+#I already have /projectnb/pongogp/zealbert/metadata_buffer_comparison.tsv and demux folders demux_04 ... demux_08 under /projectnb/pongogp/zealbert/
+
+#Clean shell and QIIME2 env 
+module purge
+module load miniconda
+source /share/pkg.8/miniconda/25.3.1/install/etc/profile.d/conda.sh
+conda activate qiime2-amplicon-2025.4
+hash -r
+
+qiime info
+
+METADATA="/projectnb/pongogp/zealbert/metadata_buffer_comparison.tsv"
+OUTDIR="/projectnb/pongogp/zealbert/qiime_fastqs"
+
+mkdir -p "$OUTDIR"
+
+tail -n +2 "$METADATA" | while IFS=$'\t' read -r group outer inner sample_id buffer sample_number
+do
+  outer2=$(printf "%02d" "$outer")
+  inner2=$(printf "%02d" "$inner")
+
+  found=""
+  for DEMUX in demux_04 demux_05 demux_06 demux_07 demux_08
+  do
+    src=$(find "/projectnb/pongogp/zealbert/$DEMUX" \
+      -type f \
+      -path "*barcode_external${outer2}_internal${inner2}*/concatenateFastq/*.fastq.gz" \
+      2>/dev/null | head -n 1)
+
+    if [[ -n "${src:-}" ]]; then
+      ln -sf "$src" "$OUTDIR/${sample_id}.fastq.gz"
+      echo "Linked ${sample_id} -> $src"
+      found="yes"
+      break
+    fi
+  done
+
+  if [[ -z "$found" ]]; then
+    echo "WARNING: no FASTQ found for sample-id=${sample_id} outer=${outer} inner=${inner}" >&2
+  fi
+done
+
+#Build manifest.tsv
+cd "$OUTDIR"
+
+printf "sample-id\tdifferential-filepath\tdirection\n" > manifest.tsv
+for f in *.fastq.gz; do
+  s="${f%.fastq.gz}"
+  printf "%s\t%s/%s\tforward\n" "$s" "$PWD" "$f" >> manifest.tsv
+done
+
+#Import FASTQs into QIIME2
+qiime tools import \
+  --type 'SampleData[SequencesWithQuality]' \
+  --input-path manifest.tsv \
+  --output-path demux.qza \
+  --input-format SingleEndFastqManifestPhred33V2
+
+#Demux summary visualization
+qiime demux summarize \
+  --i-data demux.qza \
+  --o-visualization demux.qzv
+
+#DADA2
+qiime dada2 denoise-single \
+  --i-demultiplexed-seqs demux.qza \
+  --p-trunc-len 0 \
+  --p-n-threads 0 \
+  --o-table table.qza \
+  --o-representative-sequences rep-permanqza \
+  --o-denoising-stats denoising-stats.qza
+
+#Summaries/visualizations
+qiime feature-table summarize \
+  --i-table table.qza \
+  --o-visualization table.qzv
+
+qiime feature-table tabulate-seqs \
+  --i-data rep-seqs.qza \
+  --o-visualization rep-seqs.qzv
+
+qiime metadata tabulate \
+  --m-input-file denoising-stats.qza \
+  --o-visualization denoising-stats.qzv
+
+echo "DONE. Key outputs in $OUTDIR:"
+ls -lh demux.qza demux.qzv table.qza table.qzv rep-seqs.qza rep-seqs.qzv denoising-stats.qza denoising-stats.qzv
