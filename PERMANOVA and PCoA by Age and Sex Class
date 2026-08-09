@@ -1,0 +1,115 @@
+library(tidyverse)
+library(vegan)
+library(ggplot2)
+
+#Load metadata
+meta <- read.delim("AgeSexClass_metadata.txt",
+                   sep = "\t",
+                   header = TRUE,
+                   check.names = FALSE)
+
+#Load Bray-Curtis distance matrix
+distmat <- read.delim("bray_export/distance-matrix.tsv",
+                      sep = "\t",
+                      header = TRUE,
+                      check.names = FALSE)
+
+colnames(distmat)[1] <- "#SampleID"
+
+#Convert to distance object
+rownames(distmat) <- distmat$`#SampleID`
+distmat_num <- distmat[, -1]
+
+bc_dist <- as.dist(distmat_num)
+
+#Match metadata order
+meta <- meta %>%
+  filter(`#SampleID` %in% rownames(distmat_num))
+
+meta <- meta[match(rownames(distmat_num), meta$`#SampleID`), ]
+
+#Check
+head(meta[, c("#SampleID", "Orangutan", "AgeSexClass")])
+
+#Set AgeSexClass order
+meta$AgeSexClass <- factor(
+  meta$AgeSexClass,
+  levels = c("Adult Female", "Flanged Male", "Juvenile Male", "Unflanged Male")
+)
+
+#PERMANOVA by AgeSexClass
+ageSex_perm <- adonis2(bc_dist ~ AgeSexClass,
+                       data = meta,
+                       permutations = 999)
+
+print(ageSex_perm)
+capture.output(ageSex_perm, file = "permanova_AgeSexClass.txt")
+
+#PCoA
+pcoa <- cmdscale(bc_dist, k = 2, eig = TRUE)
+
+pcoa_df <- data.frame(
+  SampleID = rownames(pcoa$points),
+  PC1 = pcoa$points[, 1],
+  PC2 = pcoa$points[, 2]
+)
+
+#Merge metadata
+pcoa_df <- left_join(pcoa_df, meta, by = c("SampleID" = "#SampleID"))
+
+#Percent variance explained
+eig_vals <- pcoa$eig
+positive_eigs <- eig_vals[eig_vals > 0]
+percent_var <- round(100 * positive_eigs / sum(positive_eigs), 1)
+
+pc1_lab <- paste0("PCoA Axis 1 (", percent_var[1], "%)")
+pc2_lab <- paste0("PCoA Axis 2 (", percent_var[2], "%)")
+
+#Color-blind friendly palette (Okabe-Ito)
+orangutan_colors <- c(
+  "Adult Female" = "#E69F00",
+  "Flanged Male" = "#0072B2",
+  "Juvenile Male" = "#CC79A7",
+  "Unflanged Male" = "#009E73"
+)
+
+#Clean publication theme
+pretty_theme <- theme_classic(base_size = 16) +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+
+#PCoA
+p_ageSex_beta <- ggplot(
+  pcoa_df,
+  aes(x = PC1, y = PC2, color = AgeSexClass)
+) +
+  geom_point(size = 4, alpha = 0.9) +
+  scale_color_manual(values = orangutan_colors) +
+  labs(
+    title = "PCoA of Bray-Curtis Distances by Age/Sex Class",
+    x = pc1_lab,
+    y = pc2_lab,
+    color = "Age/Sex Class"
+  ) +
+  pretty_theme
+
+print(p_ageSex_beta)
+
+#Save figure
+ggsave("pcoa_braycurtis_AgeSexClass_final.png",
+       plot = p_ageSex_beta,
+       width = 8,
+       height = 6,
+       dpi = 300,
+       bg = "white")
+
+#Print result clearly
+cat("\nPERMANOVA by AgeSexClass:\n")
+print(ageSex_perm)
