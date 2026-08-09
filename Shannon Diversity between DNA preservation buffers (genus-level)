@@ -1,3 +1,8 @@
+############################################################################
+#This was done to evaluate the differences bwtween three DNA preservation buffers: EtOH, RNAlater, and Zymo DNA RNA Shield.
+#Buffers were paired.
+############################################################################
+#Load Packages
 SuppressPackageStartupMessages({
   library(readxl)
   library(readr)
@@ -7,7 +12,7 @@ SuppressPackageStartupMessages({
   library(stringr)
 })
 
-#Files
+#Files (input)
 meta_file <- "/projectnb/pongogp/zealbert/metadata_buffer_comparison.xlsx"
 shannon_file <- "/projectnb/pongogp/zealbert/shannon_buffer_export2/alpha-diversity.tsv"
 
@@ -78,7 +83,7 @@ wide <- df_sum %>%
 
 print(head(wide))
 
-#Keep only complete matched sets
+#Keep only complete matched sets, i.e. only samples that have all three buffers
 wide_complete <- wide %>%
   filter(!is.na(Ethanol), !is.na(RNAlater), !is.na(ZymoShield))
 
@@ -131,6 +136,8 @@ cat("\nStats table:\n")
 print(stats)
 
 #Plot
+#Each point represents a biological sample (triplicate set)
+#The dashed line is a Shannon diversity of zero 
 p <- ggplot(delta, aes(x = comparison, y = delta_shannon)) +
   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5, color = "black") +
   geom_boxplot(
@@ -195,3 +202,4 @@ write_csv(stats, "/projectnb/pongogp/zealbert/delta_shannon_stats_final.csv")
 cat("Saved:\n")
 cat("- /projectnb/pongogp/zealbert/delta_shannon_boxplot_final.png\n")
 cat("- /projectnb/pongogp/zealbert/delta_shannon_stats_final.csv\n")
+
