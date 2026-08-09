@@ -1,0 +1,10 @@
+#In bash
+qiime longitudinal volatility \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column timepoint \
+  --m-metadata-column individual_id \
+  --p-state-column timepoint \
+  --p-individual-id-column individual_id \
+  --i-table feature-table.qza \
+  --i-metric shannon.qza \
+  --o-visualization shannon_volatility.qzv
