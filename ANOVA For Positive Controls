@@ -1,0 +1,12 @@
+#Used Positive_controls_metadata.txt
+#Extraction positives only
+aov(Shannon ~ Outer, data = df %>% filter(Type == "Extraction"))
+
+#PCR positives only
+aov(Shannon ~ Outer, data = df %>% filter(Type == "PCR"))
+
+#All Positives: PERMANOVA
+qiime diversity beta-group-significance \
+  --i-distance-matrix bray_curtis.qza \
+  --m-metadata-column Outer \
+  --p-method permanova
