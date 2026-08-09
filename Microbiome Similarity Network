@@ -1,0 +1,172 @@
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(ggrepel)
+
+#Read metadata
+meta <- read.delim(
+  "AgeSexClass_metadata.txt",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Rename for plotting
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+
+#Read Bray-Curtis distance matrix exported from QIIME
+distmat <- read.delim(
+  "bray_export/distance-matrix.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#First column should be sample IDs
+colnames(distmat)[1] <- "#SampleID"
+
+#Convert to long format
+dist_long <- distmat %>%
+  pivot_longer(
+    cols = -`#SampleID`,
+    names_to = "SampleID2",
+    values_to = "BrayCurtis"
+  ) %>%
+  rename(SampleID1 = `#SampleID`)
+
+#Join metadata
+dist_long <- dist_long %>%
+  left_join(
+    meta %>% select(`#SampleID`, Orangutan, Family),
+    by = c("SampleID1" = "#SampleID")
+  ) %>%
+  rename(
+    Orangutan1 = Orangutan,
+    Family1 = Family
+  ) %>%
+  left_join(
+    meta %>% select(`#SampleID`, Orangutan, Family),
+    by = c("SampleID2" = "#SampleID")
+  ) %>%
+  rename(
+    Orangutan2 = Orangutan,
+    Family2 = Family
+  )
+
+#Remove self-comparisons and rows with missing data
+dist_long <- dist_long %>%
+  filter(
+    SampleID1 != SampleID2,
+    !is.na(Orangutan1),
+    !is.na(Orangutan2)
+  )
+
+#Keep comparisons between different orangutans
+dist_long <- dist_long %>%
+  filter(Orangutan1 != Orangutan2)
+
+#Pair ID so each orangutan pair is compared once
+dist_long <- dist_long %>%
+  mutate(
+    pair_id = map2_chr(
+      Orangutan1,
+      Orangutan2,
+      ~ paste(sort(c(.x, .y)), collapse = "__")
+    )
+  )
+
+#Average Bray-Curtis distance between each orangutan pair
+orangutan_pairs <- dist_long %>%
+  group_by(pair_id) %>%
+  summarise(
+    Orangutan1 = sort(unique(c(Orangutan1, Orangutan2)))[1],
+    Orangutan2 = sort(unique(c(Orangutan1, Orangutan2)))[2],
+    mean_distance = mean(BrayCurtis, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    similarity = 1 - mean_distance
+  )
+
+#Save pairwise summary table
+write.table(
+  orangutan_pairs,
+  "orangutan_pairwise_mean_braycurtis.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+#Build node table: one row per orangutan
+nodes <- meta %>%
+  select(Orangutan, Family) %>%
+  distinct() %>%
+  group_by(Orangutan) %>%
+  slice(1) %>%
+  ungroup() %>%
+  rename(name = Orangutan)
+
+#Keep strongest edges only
+edge_threshold <- quantile(orangutan_pairs$similarity, 0.75, na.rm = TRUE)
+
+edges <- orangutan_pairs %>%
+  filter(similarity >= edge_threshold) %>%
+  distinct(Orangutan1, Orangutan2, .keep_all = TRUE) %>%
+  rename(
+    from = Orangutan1,
+    to = Orangutan2
+  ) %>%
+  filter(
+    from %in% nodes$name,
+    to %in% nodes$name
+  ) %>%
+  select(from, to, everything())
+
+#Build graph
+g <- graph_from_data_frame(
+  d = edges,
+  vertices = nodes,
+  directed = FALSE
+)
+
+#Plot
+p <- ggraph(g, layout = "fr") +
+  geom_edge_link(
+    aes(width = similarity),
+    alpha = 0.65,
+    colour = "grey40"
+  ) +
+  geom_node_point(
+    aes(color = Family),
+    size = 6
+  ) +
+  geom_node_label(
+    aes(label = name),
+    repel = TRUE,
+    size = 4,
+    fill = "white",
+    label.size = 0.2,
+    label.padding = unit(0.15, "lines")
+  ) +
+  scale_edge_width(range = c(0.6, 2.8)) +
+  theme_void() +
+  labs(
+    title = "Orangutan microbiome similarity network",
+    subtitle = "Edges connect orangutans with relatively similar Bray-Curtis profiles"
+  )
+
+#Save figures
+ggsave(
+  "orangutan_similarity_network.png",
+  p,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+ggsave(
+  "orangutan_similarity_network.pdf",
+  p,
+  width = 10,
+  height = 8
+)
