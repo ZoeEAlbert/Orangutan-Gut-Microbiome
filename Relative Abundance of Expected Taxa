@@ -1,0 +1,95 @@
+#Keep bacteria only, no eukaryotes
+qiime taxa filter-table \
+  --i-table table-collapsed-refseq-level7.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-include Bacteria \
+  --o-filtered-table table-bacteria.qza
+ 
+#Convert to relative frequency
+qiime feature-table relative-frequency \
+  --i-table table-bacteria.qza \
+  --o-relative-frequency-table table-bacteria-relfreq.qza
+ 
+#Keep only expected genera
+qiime taxa filter-table \
+  --i-table table-bacteria-relfreq.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-include-file expected_taxa.txt \
+  --o-filtered-table table-expected-relfreq.qza
+ 
+#Export for R
+qiime tools export \
+  --input-path table-expected-relfreq.qza \
+  --output-path relfreq_export
+ 
+#In R
+library(tidyverse)
+ 
+#Paths
+feature_tsv <- "relfreq_export/feature-table.tsv"
+meta_tsv	<- "Positive_controls_metadata.txt"
+ 
+#Expected genera
+expected_genera <- c(
+  "Listeria",
+  "Pseudomonas",
+  "Bacillus",
+  "Escherichia-Shigella",
+  "Salmonella",
+  "Lactobacillus",
+  "Enterococcus",
+  "Staphylococcus"
+)
+ 
+#Read table
+tab <- read_tsv(feature_tsv, comment = "#", show_col_types = FALSE)
+names(tab)[1] <- "Taxonomy"
+ 
+#Extract genus
+tab <- tab %>%
+  mutate(
+    Genus = str_extract(Taxonomy, "D_5__[^;]+") %>%
+        	str_remove("D_5__")
+  )
+ 
+#Keep expected genera & sum per sample
+expected_sum <- tab %>%
+  filter(Genus %in% expected_genera) %>%
+  select(-Taxonomy, -Genus) %>%
+  summarise(across(everything(), ~sum(.x, na.rm = TRUE))) %>%
+  pivot_longer(
+    everything(),
+    names_to = "SampleID",
+    values_to = "Expected_RelAbundance"
+  )
+ 
+#Metadata
+meta <- read_tsv(meta_tsv, show_col_types = FALSE)
+ 
+df <- left_join(expected_sum, meta, by = "SampleID")
+ 
+#Checks
+stopifnot(!any(is.na(df$Expected_RelAbundance)))
+ 
+df$`PCR or Extraction` <- factor(df$`PCR or Extraction`)
+print(table(df$`PCR or Extraction`))
+ 
+#ANOVA only if valid
+if (nlevels(df$`PCR or Extraction`) > 1) {
+  fit <- aov(Expected_RelAbundance ~ `PCR or Extraction`, data = df)
+  print(summary(fit))
+  print(TukeyHSD(fit))
+} else {
+  message("Only one control type present — ANOVA not applicable.")
+}
+ 
+#Plot
+ggplot(df, aes(x = `PCR or Extraction`, y = Expected_RelAbundance)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, alpha = 0.6) +
+  theme_bw() +
+  ylab("Relative abundance of expected mock taxa") +
+  xlab("Positive control type")
+ 
+# Save
+write_csv(df, "positive_controls_expected_relabundance_for_anova.csv")undance_for_anova.csv")
