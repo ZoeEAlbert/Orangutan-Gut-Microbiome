@@ -1,0 +1,105 @@
+rm(list = ls())
+
+library(tidyverse)
+
+#Clean Sample IDs
+clean_ids <- function(x) {
+  x %>%
+    trimws() %>%
+    gsub("\\s+", "", .) %>%
+    as.character()
+}
+
+#Load Shannon diversity
+alpha <- read.delim(
+  "shannon_merged_outer_export/alpha-diversity.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+colnames(alpha)[1] <- "SampleID"
+colnames(alpha)[2] <- "Shannon"
+alpha$SampleID <- clean_ids(alpha$SampleID)
+
+#Load metadata
+meta <- read.delim(
+  "Orangutan_Microbiome_Energetics_Merged.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+meta$`#SampleID` <- clean_ids(meta$`#SampleID`)
+meta$Orangutan <- trimws(meta$Orangutan)
+
+#Merge Shannon and metadata
+df <- left_join(alpha, meta, by = c("SampleID" = "#SampleID"))
+
+#Clean the nutrient columns tht I want to sue
+df$NDF <- as.numeric(df$`Total grams NDF eaten`)
+df$Carbs <- as.numeric(df$`Total grams Carbo eaten`)
+df$Lipids <- as.numeric(df$`Total grams Lipid eaten`)
+df$Protein <- as.numeric(df$`Total grams Protein eaten Crude`)
+
+#Set orangutan order
+orangutan_order <- c(
+  "Alfred",
+  "Dude",
+  "Eli",
+  "Obiwan",
+  "Tunjuk",
+  "Bayas",
+  "King",
+  "Berani",
+  "Bibi",
+  "Kabar",
+  "Sandra",
+  "Tari"
+)
+
+df$Orangutan <- factor(df$Orangutan, levels = orangutan_order)
+
+#Check
+print(table(df$Orangutan, useNA = "ifany"))
+
+#Plot (Not going to include because none are significant)
+make_plot <- function(xvar, xlab, filename) {
+  
+  plot_df <- df %>%
+    filter(!is.na(Shannon), !is.na(.data[[xvar]]))
+  
+  p <- ggplot(plot_df, aes(x = .data[[xvar]], y = Shannon, color = Orangutan)) +
+    geom_point(size = 3, alpha = 0.85) +
+    geom_smooth(
+      aes(x = .data[[xvar]], y = Shannon),
+      method = "lm",
+      se = TRUE,
+      color = "black",
+      linetype = "dashed",
+      inherit.aes = FALSE
+    ) +
+    labs(
+      x = xlab,
+      y = "Shannon diversity",
+      color = "Orangutan"
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      legend.position = "right"
+    )
+  
+  ggsave(filename, plot = p, width = 7, height = 5, dpi = 300)
+  return(p)
+}
+
+p1 <- make_plot("NDF", "NDF (g)", "Shannon_vs_NDF.png")
+p2 <- make_plot("Carbs", "Carbohydrates (g)", "Shannon_vs_Carbs.png")
+p3 <- make_plot("Lipids", "Lipids (g)", "Shannon_vs_Lipids.png")
+p4 <- make_plot("Protein", "Protein (g)", "Shannon_vs_Protein.png")
+
+#Spearman correlations (Use these to make table)
+cor.test(df$NDF, df$Shannon, method = "spearman", use = "complete.obs")
+cor.test(df$Carbs, df$Shannon, method = "spearman", use = "complete.obs")
+cor.test(df$Lipids, df$Shannon, method = "spearman", use = "complete.obs")
+cor.test(df$Protein, df$Shannon, method = "spearman", use = "complete.obs")
