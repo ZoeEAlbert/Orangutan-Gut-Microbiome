@@ -1,0 +1,237 @@
+rm(list = ls())
+
+library(tidyverse)
+library(ggplot2)
+library(scales)
+
+#Read genus table
+genus_table <- read.delim(
+  "genus_table.tsv",
+  sep = "\t",
+  header = TRUE,
+  skip = 1,
+  check.names = FALSE,
+  comment.char = "",
+  quote = "",
+  fill = TRUE
+)
+
+colnames(genus_table)[1] <- "Taxon"
+
+#Read metadata
+meta <- read.delim(
+  "AgeSexClass_metadata.txt",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Convert to long format
+genus_long <- genus_table %>%
+  pivot_longer(
+    cols = -Taxon,
+    names_to = "SampleID",
+    values_to = "Abundance"
+  )
+
+#Merge metadata
+genus_long <- genus_long %>%
+  left_join(meta, by = c("SampleID" = "#SampleID")) %>%
+  filter(!is.na(AgeSexClass))
+
+#Extract genus names 
+genus_long <- genus_long %>%
+  mutate(
+    Genus = ifelse(grepl("g__", Taxon), sub(".*g__", "", Taxon), NA_character_),
+    Genus = ifelse(grepl(";.*", Genus), sub(";.*", "", Genus), Genus),
+    Genus = trimws(Genus)
+  )
+
+#Remove unwanted categories
+genus_long <- genus_long %>%
+  filter(
+    !is.na(Genus),
+    Genus != "",
+    !grepl("Mitochondria", Taxon, ignore.case = TRUE),
+    !grepl("Eukaryota", Taxon, ignore.case = TRUE),
+    !grepl("Chloroplast", Taxon, ignore.case = TRUE),
+    !Genus %in% c("uncultured", "metagenome", "Ambiguous_taxa", "Unassigned")
+  )
+
+#Set AgeSexClass order
+genus_long$AgeSexClass <- factor(
+  genus_long$AgeSexClass,
+  levels = c(
+    "Flanged Male",
+    "Unflanged Male",
+    "Juvenile Male",
+    "Adult Female"
+  )
+)
+
+#Identify top 10 genera overall
+top_genera <- genus_long %>%
+  group_by(Genus) %>%
+  summarise(total = sum(Abundance), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = 10) %>%
+  pull(Genus)
+
+#Collapse all others into “Other”
+genus_long <- genus_long %>%
+  mutate(Genus = ifelse(Genus %in% top_genera, Genus, "Other"))
+
+#Summarize by AgeSexClass
+genus_age_sex <- genus_long %>%
+  group_by(AgeSexClass, Genus) %>%
+  summarise(Abundance = sum(Abundance), .groups = "drop")
+
+#Relative abundance table
+genus_rel <- genus_age_sex %>%
+  group_by(AgeSexClass) %>%
+  mutate(RelativeAbundance = Abundance / sum(Abundance)) %>%
+  ungroup()
+
+#Order genera by total abundance
+genus_levels <- genus_age_sex %>%
+  group_by(Genus) %>%
+  summarise(total = sum(Abundance), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  pull(Genus)
+
+genus_age_sex$Genus <- factor(genus_age_sex$Genus, levels = rev(genus_levels))
+genus_rel$Genus <- factor(genus_rel$Genus, levels = rev(genus_levels))
+
+#Colors
+okabe_ito <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+  "#D55E00", "#CC79A7", "#999999", "#000000", "#88CCEE", "#DDCC77"
+)
+
+n_genera <- length(unique(genus_rel$Genus))
+fill_colors <- okabe_ito[seq_len(n_genera)]
+
+#Relative abundance plot
+p_rel <- ggplot(
+  genus_rel,
+  aes(x = AgeSexClass, y = RelativeAbundance, fill = Genus)
+) +
+  geom_col(width = 0.85) +
+  scale_fill_manual(values = fill_colors) +
+  theme_classic(base_size = 18) +
+  labs(
+    title = "Relative abundance of top 10 genera by age-sex class",
+    x = "Age-Sex Class",
+    y = "Relative abundance",
+    fill = "Genus"
+  ) +
+  guides(
+    fill = guide_legend(
+      nrow = 3,
+      byrow = TRUE
+    )
+  ) +
+  theme(
+    axis.text.x = element_text(size = 16, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    axis.title = element_text(size = 18),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(face = "italic", size = 10),
+    legend.key.size = unit(0.5, "cm"),
+    plot.margin = margin(10, 10, 20, 10)
+  )
+
+print(p_rel)
+
+#Differential abundance plot
+p_abs <- ggplot(
+  genus_age_sex,
+  aes(x = AgeSexClass, y = Abundance, fill = Genus)
+) +
+  geom_col(width = 0.85) +
+  scale_fill_manual(values = fill_colors) +
+  scale_y_log10(labels = label_scientific()) +
+  theme_classic(base_size = 18) +
+  labs(
+    title = "Differential abundance of top 10 genera by age-sex class",
+    x = "Age-Sex Class",
+    y = "Differential abundance (log10 scale)",
+    fill = "Genus"
+  ) +
+  guides(
+    fill = guide_legend(
+      nrow = 3,
+      byrow = TRUE
+    )
+  ) +
+  theme(
+    axis.text.x = element_text(size = 16, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    axis.title = element_text(size = 18),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(face = "italic", size = 10),
+    legend.key.size = unit(0.5, "cm"),
+    plot.margin = margin(10, 10, 20, 10)
+  )
+
+print(p_abs)
+
+#Save figures
+ggsave(
+  "relative_abundance_AgeSexClass.png",
+  plot = p_rel,
+  width = 12,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "relative_abundance_AgeSexClass.pdf",
+  plot = p_rel,
+  width = 12,
+  height = 9,
+  bg = "white"
+)
+
+ggsave(
+  "differential_abundance_AgeSexClass.png",
+  plot = p_abs,
+  width = 12,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "differential_abundance_AgeSexClass.pdf",
+  plot = p_abs,
+  width = 12,
+  height = 9,
+  bg = "white"
+)
+
+#Save tables
+write.table(
+  genus_rel,
+  file = "relative_abundance_AgeSexClass.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+write.table(
+  genus_age_sex,
+  file = "differential_abundance_AgeSexClass.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+cat("Top genera kept:\n")
+print(sort(setdiff(unique(genus_rel$Genus), "Other")))
+cat("DONE\n")
