@@ -1,0 +1,155 @@
+rm(list = ls())
+
+library(tidyverse)
+library(lubridate)
+library(viridis)
+library(patchwork)
+
+#Load metadata
+meta <- read.delim(
+  "AgeSexClass_metadata.txt",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Rename orangutans who are labeled with temporary name
+meta$Orangutan[meta$Orangutan == "UML06MAY24"] <- "Eli"
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+
+meta <- meta %>%
+  mutate(
+    Collection_Date = mdy(Collection_Date),
+    `#SampleID` = as.character(`#SampleID`)
+  )
+
+#Read exported PCoA file
+pcoa_raw <- read.delim(
+  "bray_curtis_pcoa_export/ordination.txt",
+  sep = "\t",
+  header = FALSE
+)
+
+#First column = SampleID
+colnames(pcoa_raw)[1] <- "SampleID"
+
+#First two axes
+colnames(pcoa_raw)[2:3] <- c("PC1", "PC2")
+
+pcoa <- pcoa_raw %>%
+  select(SampleID, PC1, PC2)
+
+#Merge with metadata
+plot_df <- pcoa %>%
+  left_join(meta, by = c("SampleID" = "#SampleID")) %>%
+  filter(
+    !is.na(Orangutan),
+    !is.na(Collection_Date)
+  )
+
+#Remove individuals with only one sample
+plot_df <- plot_df %>%
+  group_by(Orangutan) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+#Sort by date
+plot_df <- plot_df %>%
+  arrange(Orangutan, Collection_Date)
+
+plot_df$Orangutan <- factor(
+  plot_df$Orangutan,
+  levels = sort(unique(plot_df$Orangutan))
+)
+
+#Shared date scale settings
+date_breaks <- c(
+  min(plot_df$Collection_Date, na.rm = TRUE),
+  max(plot_df$Collection_Date, na.rm = TRUE)
+)
+
+date_labels <- c("Earlier", "Later")
+
+#Top panel: all individuals together
+p_all <- ggplot(
+  plot_df,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = Collection_Date
+  )
+) +
+  geom_point(size = 3.2, alpha = 0.9) +
+  labs(
+    title = "All Individuals",
+    x = "PCoA Axis 1",
+    y = "PCoA Axis 2"
+  ) +
+  scale_color_viridis_c(
+    option = "plasma",
+    name = "Sampling Time",
+    breaks = date_breaks,
+    labels = date_labels
+  ) +
+  theme_bw(base_size = 15) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),
+    panel.grid.minor = element_blank(),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+#bottom panels: faceted by orangutan
+p_facet <- ggplot(
+  plot_df,
+  aes(
+    x = PC1,
+    y = PC2,
+    color = Collection_Date
+  )
+) +
+  geom_point(size = 3.5) +
+  facet_wrap(~ Orangutan) +
+  scale_color_viridis_c(
+    option = "plasma",
+    name = "Sampling Time",
+    breaks = date_breaks,
+    labels = date_labels
+  ) +
+  labs(
+    title = "Temporal Dynamics of Gut Microbiome Composition",
+    x = "PCoA Axis 1",
+    y = "PCoA Axis 2"
+  ) +
+  theme_bw(base_size = 15) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.title = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+#Combine into one figure 
+final_plot <- p_all / p_facet +
+  plot_layout(heights = c(1, 2))
+
+print(final_plot)
+
+#Save
+ggsave(
+  "braycurtis_temporal_pcoa_combined.png",
+  plot = final_plot,
+  width = 12,
+  height = 12,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "braycurtis_temporal_pcoa_combined.pdf",
+  plot = final_plot,
+  width = 12,
+  height = 12,
+  bg = "white"
+)
