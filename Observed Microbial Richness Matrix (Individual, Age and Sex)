@@ -1,0 +1,204 @@
+rm(list = ls())
+library(tidyverse)
+library(ggplot2)
+
+#File paths
+meta_file <- "/projectnb/pongogp/zealbert/Orangutan_Microbiome_Energetics_Merged.tsv"
+observed_file <- "observed_features_export/alpha-diversity.tsv"
+
+#Read observed features
+observed <- read.delim(
+  observed_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+colnames(observed)[1] <- "#SampleID"
+colnames(observed)[2] <- "ObservedFeatures"
+
+#Read metadata
+meta <- read.delim(
+  meta_file,
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Merge observed features with metadata
+obs_meta <- observed %>%
+  left_join(meta, by = "#SampleID")
+
+#Clean data
+obs_meta <- obs_meta %>%
+  filter(!is.na(Orangutan), !is.na(AgeSexClass)) %>%
+  mutate(
+    Orangutan = trimws(Orangutan),
+    AgeSexClass = trimws(AgeSexClass)
+  )
+
+# Orangutan order should be the same throughout 
+desired_order <- c(
+  "Alfred", "Balon", "Bilbo", "Dude", "Eli", "Obiwan", "Tunjuk",
+  "Bayas", "King", "Berani", "Bibi", "Kabar", "Sandra", "Tari", "Telur"
+)
+
+present_order <- desired_order[desired_order %in% unique(obs_meta$Orangutan)]
+obs_meta$Orangutan <- factor(obs_meta$Orangutan, levels = present_order)
+
+#Age-sex class order
+obs_meta$AgeSexClass <- factor(
+  obs_meta$AgeSexClass,
+  levels = c(
+    "Adult Female",
+    "Flanged Male",
+    "Juvenile Male",
+    "Unflanged Male"
+  )
+)
+
+#Add n for each individual’s sample size
+n_table <- obs_meta %>%
+  group_by(Orangutan) %>%
+  summarize(n_samples = n(), .groups = "drop")
+
+x_labels <- setNames(
+  paste0(as.character(n_table$Orangutan), "\n(n=", n_table$n_samples, ")"),
+  n_table$Orangutan
+)
+
+#Plot 1 Observed richness by age/sex class
+p_obs <- ggplot(
+  obs_meta,
+  aes(
+    x = AgeSexClass,
+    y = ObservedFeatures,
+    fill = AgeSexClass
+  )
+) +
+  geom_boxplot(
+    alpha = 0.85,
+    outlier.shape = NA,
+    colour = "black"
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 2.2,
+    alpha = 0.85,
+    color = "black"
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Adult Female" = "#E69F00",
+      "Flanged Male" = "#56B4E9",
+      "Juvenile Male" = "#009E73",
+      "Unflanged Male" = "#CC79A7"
+    ),
+    guide = guide_legend(
+      override.aes = list(shape = NA)
+    )
+  ) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Observed microbial richness by age/sex class",
+    x = "Age/Sex class",
+    y = "Observed features",
+    fill = "Age/Sex class"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+
+print(p_obs)
+
+#Plot 2 Observed richness by orangutan
+p_obs_individual <- ggplot(
+  obs_meta,
+  aes(
+    x = Orangutan,
+    y = ObservedFeatures,
+    fill = AgeSexClass
+  )
+) +
+  geom_boxplot(
+    colour = "black",
+    width = 0.7,
+    outlier.shape = NA,
+    alpha = 0.85
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 2.2,
+    alpha = 0.85,
+    color = "black"
+  ) +
+  scale_x_discrete(labels = x_labels) +
+  scale_fill_manual(
+    values = c(
+      "Adult Female" = "#E69F00",
+      "Flanged Male" = "#56B4E9",
+      "Juvenile Male" = "#009E73",
+      "Unflanged Male" = "#CC79A7"
+    ),
+    guide = guide_legend(
+      override.aes = list(shape = NA)
+    )
+  ) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Observed microbial richness by orangutan",
+    x = "Orangutan",
+    y = "Observed features",
+    fill = "Age/Sex class"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
+    axis.text.y = element_text(color = "black"),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+
+print(p_obs_individual)
+
+#Save age/sex plot
+ggsave(
+  "observed_features_age_sex.png",
+  plot = p_obs,
+  width = 8,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "observed_features_age_sex.pdf",
+  plot = p_obs,
+  width = 8,
+  height = 6,
+  bg = "white"
+)
+
+#Save orangutan plot
+ggsave(
+  "observed_features_by_orangutan_colored_n.png",
+  plot = p_obs_individual,
+  width = 16,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "observed_features_by_orangutan_colored_n.pdf",
+  plot = p_obs_individual,
+  width = 16,
+  height = 7,
+  bg = "white"
+)
