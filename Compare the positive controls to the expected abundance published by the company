@@ -1,0 +1,94 @@
+#In bash, load modules and setup environment 
+module purge
+module load miniconda
+conda activate qiime2-amplicon-2025.4
+hash -r
+qiime --help
+
+#Navigate to my directory
+cd/projectnb/pongogp/zealbert/demux_08/barcode_external08_internal01_537938/resultDir_barcode_external08_internal01/collapseTables
+
+#Export one.qza file into a table format. I chose species level (level 7).
+qiime tools export \
+  --input-path table-collapsed-absfreq-level7.qza \
+  --output-path exported-table-level7
+
+#Above generates a BIOM file that needs to be converted into a TSV
+module load biom
+biom convert \
+  -i exported-table-level7/feature-table.biom \
+  -o exported-table-level7/feature-table.tsv \
+  --to-tsv
+
+#Export taxonomy
+cd /projectnb/pongogp/zealbert/demux_07/.../assignTaxonomy
+
+qiime tools export \
+  --input-path ../assignTaxonomy/taxonomy.qza \
+  --output-path exported-taxonomy
+
+#In R, calculate relative abundance for my samples
+library(tidyverse)
+
+counts <- read_tsv(
+  "feature-table-absfreq-level7.tsv",
+  comment = "#"
+)
+
+#Convert to long format
+counts_long <- counts %>%
+  pivot_longer(
+    cols = -Taxon,
+    names_to = "SampleID",
+    values_to = "Reads"
+  )
+
+#Make sure positive controls are their own excel sheet. Export it and name it positive_controls.csv
+pos_meta <- read_csv("positive_controls.csv")
+counts_pos <- counts_long %>%
+  filter(SampleID %in% pos_meta$SampleID)
+
+#Calculate relative abundance per sample
+counts_pos <- counts_pos %>%
+  group_by(SampleID) %>%
+  mutate(RelAbundance = Reads / sum(Reads) * 100) %>%
+  ungroup()
+
+#Zymo expected abundances from website ((https://www.zymoresearch.com/products/zymobiomics-microbial-community-dna-standard) 
+zymo <- tibble(
+  Taxon = c(
+    "Listeria monocytogenes",
+    "Pseudomonas aeruginosa",
+    "Bacillus subtilis",
+    "Escherichia coli",
+    "Salmonella enterica",
+    "Lactobacillus fermentum",
+    "Enterococcus faecalis",
+    "Staphylococcus aureus",
+    "Saccharomyces cerevisiae",
+    "Cryptococcus neoformans"
+  ),
+  Expected = c(12,12,12,12,12,12,12,12,2,2)
+)
+
+#Join observed and expected
+df <- left_join(obs_long, zymo, by = "#OTU ID")
+
+counts_pos <- counts_pos %>%
+inner_join(zymo_expected, by = "Taxon")
+
+#Plot
+library(ggplot2)
+
+ggplot(counts_pos, aes(x = Taxon, y = RelAbundance)) +
+  geom_col(fill = "steelblue") +
+ 	 geom_point(aes(y = Expected), color = "red", size = 3) +
+ 	 facet_wrap(~ SampleID, scales = "free_x") +
+ 	 theme_bw() +
+ 	 theme(
+   	 axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+  y = "Relative Abundance (%)",
+  title = "Positive Controls vs Zymo Expected Composition"
+  )
