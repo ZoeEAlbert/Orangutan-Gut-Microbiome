@@ -1,0 +1,98 @@
+library(tidyverse)
+
+#Load data
+meta <- read.delim(
+  "Orangutan_Microbiome_Energetics_Merged.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Rename calorie column
+meta$Calories <- meta$`Ttl Kcal eaten 1.782 no lignin Available Protein`
+
+#Remove missing values
+meta <- meta %>%
+  filter(!is.na(Calories))
+
+#Orangutan order
+orangutan_order <- c(
+  "Alfred",
+  "Dude",
+  "Eli",
+  "Obiwan",
+  "Tunjuk",
+  "Bayas",
+  "King",
+  "Berani",
+  "Bibi",
+  "Kabar",
+  "Sandra",
+  "Tari"
+)
+
+meta$Orangutan <- factor(meta$Orangutan, levels = orangutan_order)
+
+#Calculate sample sizes
+sample_sizes <- meta %>%
+  group_by(Orangutan) %>%
+  summarise(n = n())
+
+#Create x-axis labels with sample size
+labels <- paste0(sample_sizes$Orangutan, " (n=", sample_sizes$n, ")")
+names(labels) <- sample_sizes$Orangutan
+
+#Colorblind-friendly palette
+palette_cb <- c(
+  "#E69F00","#56B4E9","#009E73","#F0E442",
+  "#0072B2","#D55E00","#CC79A7","#999999",
+  "#66C2A5","#FC8D62","#8DA0CB","#E78AC3"
+)
+
+#Plot
+calorie_plot <- ggplot(meta, aes(x = Orangutan, y = Calories, fill = Orangutan)) +
+  
+  geom_violin(alpha = 0.6, width = 1, color = NA) +
+  
+  geom_jitter(
+    width = 0.15,
+    size = 2.5,
+    alpha = 0.75,
+    color = "black"
+  ) +
+  
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 4.5,
+    fill = "white",
+    color = "black"
+  ) +
+  
+  scale_x_discrete(labels = labels) +
+  scale_fill_manual(values = palette_cb) +
+  
+  theme_classic(base_size = 16) +
+  
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  
+  labs(
+    x = "Individual Orangutan",
+    y = "Daily Energy Intake (kcal)",
+    title = "Daily Energy Intake Across Individual Orangutans"
+  )
+
+print(calorie_plot)
+
+#Save figure
+ggsave(
+  "Calories_by_Individual_Final.png",
+  plot = calorie_plot,
+  width = 13,
+  height = 7,
+  dpi = 600
+)
