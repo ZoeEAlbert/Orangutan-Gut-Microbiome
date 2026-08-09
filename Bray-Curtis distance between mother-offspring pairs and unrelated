@@ -1,0 +1,69 @@
+library(tidyverse)
+library(ggplot2)
+
+#Read pairwise orangutan mean Bray-Curtis distances
+pairs <- read.delim("orangutan_pairwise_mean_braycurtis.tsv", sep = "\t", header = TRUE)
+
+#Define mother-offspring pairs
+mother_offspring <- tribble(
+  ~Orangutan1, ~Orangutan2,
+  "Bibi", "Berani",
+  "Bibi", "Bayas",
+  "Kabar", "King"
+) %>%
+  mutate(pair_id = map2_chr(Orangutan1, Orangutan2, ~paste(sort(c(.x, .y)), collapse = "__")))
+
+#Add pair IDs to the pairwise table
+pairs <- pairs %>%
+  mutate(pair_id = map2_chr(Orangutan1, Orangutan2, ~paste(sort(c(.x, .y)), collapse = "__")))
+
+#Label comparisons
+pairs_labeled <- pairs %>%
+  mutate(Relationship = ifelse(pair_id %in% mother_offspring$pair_id,
+                               "Mother-offspring",
+                               "Unrelated"))
+
+#Keep only the pairs I want
+plot_df <- pairs_labeled %>%
+  select(Orangutan1, Orangutan2, mean_distance, similarity, Relationship)
+
+#Wilcoxon test
+test <- wilcox.test(mean_distance ~ Relationship, data = plot_df, exact = FALSE)
+
+pval <- signif(test$p.value, 3)
+
+#Plot
+p <- ggplot(plot_df, aes(x = Relationship, y = mean_distance, fill = Relationship)) +
+  geom_boxplot(width = 0.55, outlier.shape = NA, alpha = 0.8) +
+  geom_jitter(width = 0.12, size = 3, alpha = 0.9) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Mother-offspring vs unrelated microbiome distances",
+    subtitle = paste("Wilcoxon p =", pval),
+    x = "",
+    y = "Mean Bray-Curtis distance"
+  ) +
+  theme(legend.position = "none")
+
+ggsave("mother_offspring_vs_unrelated_boxplot.png", p, width = 8, height = 6, dpi = 300)
+ggsave("mother_offspring_vs_unrelated_boxplot.pdf", p, width = 8, height = 6)
+
+print(p)
+
+#Save 
+summary_table <- plot_df %>%
+  group_by(Relationship) %>%
+  summarise(
+    n = n(),
+    mean_distance = mean(mean_distance, na.rm = TRUE),
+    median_distance = median(mean_distance, na.rm = TRUE),
+    sd_distance = sd(mean_distance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write.table(summary_table,
+            "mother_offspring_vs_unrelated_summary.tsv",
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat("\nWilcoxon test p-value:", test$p.value, "\n")
+print(summary_table)
