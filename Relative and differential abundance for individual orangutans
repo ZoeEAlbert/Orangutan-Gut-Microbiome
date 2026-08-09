@@ -1,0 +1,233 @@
+rm(list = ls())
+library(tidyverse)
+library(RColorBrewer)
+library(scales)
+library(grid)
+
+#Read genus table
+genus_table <- read.delim(
+  "genus_table.tsv",
+  sep = "\t",
+  header = TRUE,
+  skip = 1,
+  check.names = FALSE,
+  comment.char = "",
+  quote = "",
+  fill = TRUE
+)
+
+colnames(genus_table)[1] <- "Taxon"
+
+#Read metadata
+meta <- read.delim(
+  "/projectnb/pongogp/zealbert/Orangutan_Microbiome_Energetics_Merged.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Fix names
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+meta$Orangutan[meta$Orangutan == "UML06MAY24"] <- "Eli"
+
+meta_sub <- meta %>%
+  dplyr::select(`#SampleID`, Orangutan, Sex, AgeSexClass)
+
+#Join metadata
+tax_long <- genus_table %>%
+  pivot_longer(
+    cols = -Taxon,
+    names_to = "SampleID",
+    values_to = "Abundance"
+  )
+
+plot_df <- tax_long %>%
+  inner_join(
+    meta_sub,
+    by = c("SampleID" = "#SampleID")
+  ) %>%
+  filter(!is.na(Orangutan))
+
+cat("Matched samples:", length(unique(plot_df$SampleID)), "\n")
+cat("Matched orangutans:\n")
+print(sort(unique(plot_df$Orangutan)))
+
+#Extract genus cleanly
+plot_df <- plot_df %>%
+  mutate(
+    Genus = ifelse(grepl("g__", Taxon), sub(".*g__", "", Taxon), NA_character_),
+    Genus = ifelse(grepl(";.*", Genus), sub(";.*", "", Genus), Genus),
+    Genus = trimws(Genus)
+  )
+
+#Remove unwanted categories
+plot_df <- plot_df %>%
+  filter(
+    !is.na(Genus),
+    Genus != "",
+    !grepl("Mitochondria", Taxon, ignore.case = TRUE),
+    !grepl("Eukaryota", Taxon, ignore.case = TRUE),
+    !grepl("Chloroplast", Taxon, ignore.case = TRUE),
+    !Genus %in% c("uncultured", "metagenome", "Ambiguous_taxa", "Unassigned")
+  )
+
+#Sum abundance by orangutan/genus
+genus_orang <- plot_df %>%
+  group_by(Orangutan, Genus) %>%
+  summarise(Abundance = sum(Abundance), .groups = "drop")
+
+#Keep top 10 genera overall
+top_genera <- genus_orang %>%
+  group_by(Genus) %>%
+  summarise(total = sum(Abundance), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  slice_head(n = 10) %>%
+  pull(Genus)
+
+genus_orang_top <- genus_orang %>%
+  mutate(Genus = ifelse(Genus %in% top_genera, Genus, "Other")) %>%
+  group_by(Orangutan, Genus) %>%
+  summarise(Abundance = sum(Abundance), .groups = "drop") %>%
+  group_by(Orangutan) %>%
+  mutate(RelativeAbundance = Abundance / sum(Abundance)) %>%
+  ungroup()
+
+#Order genera
+genus_levels <- genus_orang_top %>%
+  group_by(Genus) %>%
+  summarise(total = sum(Abundance), .groups = "drop") %>%
+  arrange(desc(total)) %>%
+  pull(Genus)
+
+genus_orang_top$Genus <- factor(genus_orang_top$Genus, levels = rev(genus_levels))
+
+# =========================
+#Standard orangutan order for all graphs
+desired_order <- c(
+  "Alfred", "Balon", "Bilbo", "Dude", "Eli", "Obiwan", "Tunjuk",
+  "Bayas", "King", "Berani", "Bibi", "Kabar", "Sandra", "Tari", "Telur"
+)
+
+present_order <- desired_order[desired_order %in% unique(genus_orang_top$Orangutan)]
+
+genus_orang_top$Orangutan <- factor(
+  genus_orang_top$Orangutan,
+  levels = present_order
+)
+
+#Colors
+okabe_ito <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+  "#D55E00", "#CC79A7", "#999999", "#000000", "#88CCEE", "#DDCC77"
+)
+
+n_genera <- length(unique(genus_orang_top$Genus))
+fill_colors <- okabe_ito[seq_len(n_genera)]
+
+#Relative abundance plot
+p_rel <- ggplot(
+  genus_orang_top,
+  aes(x = Orangutan, y = RelativeAbundance, fill = Genus)
+) +
+  geom_col(width = 0.85) +
+  scale_fill_manual(values = fill_colors) +
+  theme_classic(base_size = 16) +
+  labs(
+    x = "Individual orangutan",
+    y = "Relative abundance",
+    fill = "Genus",
+    title = "Relative abundance of top 10 genera by individual"
+  ) +
+  guides(
+    fill = guide_legend(
+      nrow = 3,
+      byrow = TRUE
+    )
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(face = "italic", size = 10),
+    legend.key.size = unit(0.5, "cm")
+  )
+
+print(p_rel)
+
+ggsave(
+  "AgeSex_relative_abundance_individual_top10_final_fixed.pdf",
+  plot = p_rel,
+  width = 14,
+  height = 9
+)
+
+ggsave(
+  "AgeSex_relative_abundance_individual_top10_final_fixed.png",
+  plot = p_rel,
+  width = 14,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+
+#Differential abundance plot
+p_abs <- ggplot(
+  genus_orang_top,
+  aes(x = Orangutan, y = Abundance, fill = Genus)
+) +
+  geom_col(width = 0.85) +
+  scale_fill_manual(values = fill_colors) +
+  scale_y_log10(labels = label_scientific()) +
+  theme_classic(base_size = 16) +
+  labs(
+    x = "Individual orangutan",
+    y = "Differential abundance (log10 scale)",
+    fill = "Genus",
+    title = "Differential abundance of top 10 genera by individual"
+  ) +
+  guides(
+    fill = guide_legend(
+      nrow = 3,
+      byrow = TRUE
+    )
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(face = "italic", size = 10),
+    legend.key.size = unit(0.5, "cm")
+  )
+
+print(p_abs)
+
+ggsave(
+  "AgeSex_differential_abundance_individual_top10_final_fixed.pdf",
+  plot = p_abs,
+  width = 14,
+  height = 9
+)
+
+ggsave(
+  "AgeSex_differential_abundance_individual_top10_final_fixed.png",
+  plot = p_abs,
+  width = 14,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+
+#Save table
+write.table(
+  genus_orang_top,
+  file = "AgeSex_individual_genus_abundance_top10_final_fixed.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+cat("Top genera kept:\n")
+print(sort(setdiff(unique(genus_orang_top$Genus), "Other")))
+cat("DONE\n")
