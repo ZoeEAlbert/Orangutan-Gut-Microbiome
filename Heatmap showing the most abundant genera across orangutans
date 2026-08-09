@@ -1,0 +1,125 @@
+library(tidyverse)
+library(pheatmap)
+
+#Load genus table
+table <- read.delim("genus_table.tsv", skip = 1, check.names = FALSE)
+colnames(table)[1] <- "Genus"
+
+#Keep original taxonomy
+table$OriginalTaxonomy <- table$Genus
+
+#Extract genus
+table$Genus <- gsub(".*g__", "", table$Genus)
+
+#If genus is missing, label as Unassigned
+table$Genus[table$Genus == table$OriginalTaxonomy] <- "Unassigned"
+table$Genus[is.na(table$Genus) | table$Genus == ""] <- "Unassigned"
+
+#Remove non-informative taxa
+drop_patterns <- c("Mitochondria", "Chloroplast", "Eukaryota")
+table <- table[!grepl(paste(drop_patterns, collapse="|"), table$OriginalTaxonomy, ignore.case = TRUE), ]
+
+#Make names unique
+table$Genus <- make.unique(table$Genus)
+
+#Drop vague taxa
+table <- table[!grepl("^uncultured", table$Genus, ignore.case = TRUE), ]
+table <- table[!grepl("^Unassigned", table$Genus, ignore.case = TRUE), ]
+
+#Convert to matrix
+df_mat <- table %>%
+  select(-OriginalTaxonomy)
+
+rownames(df_mat) <- df_mat$Genus
+df_mat$Genus <- NULL
+
+mat <- as.matrix(df_mat)
+mode(mat) <- "numeric"
+
+#Convert to relative abundance within sample
+mat <- sweep(mat, 2, colSums(mat), "/")
+
+#Load metadata
+meta <- read.delim("AgeSexClass_metadata.txt", sep = "\t", check.names = FALSE)
+
+#Rename for plotting
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+
+#Keep only shared samples
+common_samples <- intersect(colnames(mat), meta$`#SampleID`)
+mat <- mat[, common_samples, drop = FALSE]
+meta <- meta %>% filter(`#SampleID` %in% common_samples)
+
+#Reorder metadata to match matrix columns
+meta <- meta[match(colnames(mat), meta$`#SampleID`), ]
+
+#Average by orangutan
+orangutans <- unique(meta$Orangutan)
+
+mat_orang <- sapply(orangutans, function(o) {
+  samples <- meta$`#SampleID`[meta$Orangutan == o]
+  if (length(samples) == 1) {
+    mat[, samples]
+  } else {
+    rowMeans(mat[, samples, drop = FALSE], na.rm = TRUE)
+  }
+})
+
+#Keep top 12 taxa
+top_genera <- names(sort(rowSums(mat_orang), decreasing = TRUE))[1:12]
+mat_top <- mat_orang[top_genera, , drop = FALSE]
+
+#Clean row labels manually
+clean_labels <- rownames(mat_top)
+clean_labels <- gsub("Rikenellaceae_RC9_gut_group", "Rikenellaceae RC9", clean_labels)
+clean_labels <- gsub("Christensenellaceae_R-7_group", "Christensenellaceae R-7", clean_labels)
+clean_labels <- gsub("\\[Eubacterium\\]_hallii_group", "Eubacterium hallii", clean_labels)
+clean_labels <- gsub("\\[Eubacterium\\]_coprostanoligenes_group", "Eubacterium coprostanol.", clean_labels)
+clean_labels <- gsub("Clostridia_vadinBB60_group", "Clostridia vadinBB60", clean_labels)
+clean_labels <- gsub("Ruminococcus", "Ruminococcus", clean_labels)
+clean_labels <- gsub("Faecalibacterium", "Faecalibacterium", clean_labels)
+clean_labels <- gsub("Blautia", "Blautia", clean_labels)
+rownames(mat_top) <- clean_labels
+
+#Log transform for display
+mat_top <- log10(mat_top + 1e-4)
+
+#Colors
+heat_cols <- colorRampPalette(c("#4575B4", "#F7F2C4", "#D73027"))(100)
+
+#Plot
+png("orangutan_genus_heatmap_final.png", width = 2200, height = 1600, res = 220)
+pheatmap(
+  mat_top,
+  color = heat_cols,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  clustering_method = "average",
+  border_color = "grey70",
+  fontsize_row = 18,
+  fontsize_col = 16,
+  angle_col = 45,
+  cellwidth = 42,
+  cellheight = 42,
+  treeheight_row = 70,
+  treeheight_col = 70,
+  main = "Top genera by orangutan"
+)
+dev.off()
+
+pdf("orangutan_genus_heatmap_final.pdf", width = 14, height = 10)
+pheatmap(
+  mat_top,
+  color = heat_cols,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  clustering_method = "average",
+  border_color = "grey70",
+  fontsize_row = 12,
+  fontsize_col = 11,
+  angle_col = 45,
+  treeheight_row = 60,
+  treeheight_col = 60,
+  main = "Top genera by orangutan"
+)
+dev.off()
