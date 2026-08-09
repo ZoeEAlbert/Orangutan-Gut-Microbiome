@@ -1,0 +1,187 @@
+OUTDIR="sandra_preg_vs_postpartum"
+
+cat > "$OUTDIR/H3_stackedbars_clean_with_birth.R" <<'RSCRIPT'
+#!/usr/bin/env Rscript
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tidyr); library(stringr)
+  library(ggplot2); library(biomformat); library(scales)
+})
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 4) {
+  stop("Usage: Rscript H3_stackedbars_clean_with_birth.R <relfreq_biom> <taxonomy_tsv> <metadata_tsv> <out_prefix>")
+}
+
+biom_path  <- args[1]
+tax_path   <- args[2]
+meta_path  <- args[3]
+out_prefix <- args[4]
+
+meta_sample_col <- "#SampleID"
+meta_day_col    <- "pregnancy_day"
+
+#Colors
+COL_FIRM <- "#0072B2"
+COL_BACT <- "#E69F00"
+COL_OTH  <- "grey80"
+
+#BIOM
+b <- read_biom(biom_path)
+mat <- as.matrix(biom_data(b))
+
+rel <- as.data.frame(mat) %>%
+  tibble::rownames_to_column("FeatureID") %>%
+  pivot_longer(-FeatureID, names_to="SampleID", values_to="RelAbund")
+
+#Taxonomy
+tax <- read_tsv(tax_path, show_col_types = FALSE)
+
+feat_candidates <- c("Feature ID","FeatureID","feature-id","FeatureId","OTU ID","ASV ID")
+feat_col <- intersect(names(tax), feat_candidates)[1]
+if (is.na(feat_col)) feat_col <- names(tax)[1]
+
+tax_candidates <- c("Taxon","taxon","taxonomy","Taxonomy")
+tax_col <- intersect(names(tax), tax_candidates)[1]
+if (is.na(tax_col)) tax_col <- names(tax)[2]
+
+tax2 <- tax %>%
+  rename(FeatureID = all_of(feat_col),
+         Taxon     = all_of(tax_col)) %>%
+  mutate(
+    Phylum = str_match(Taxon, "p__([^;]+)")[,2],
+    Phylum = ifelse(is.na(Phylum) | Phylum=="", NA_character_, Phylum)
+  ) %>%
+  select(FeatureID, Phylum)
+
+#Metadata
+meta <- read_tsv(meta_path, show_col_types = FALSE)
+
+meta2 <- meta %>%
+  rename(SampleID = all_of(meta_sample_col),
+         PregnancyDay = all_of(meta_day_col)) %>%
+  mutate(
+    PregnancyDay = as.numeric(PregnancyDay),
+    Stage = ifelse(Trimester == "New mom", "Postpartum", "Pregnancy"),
+    Stage = factor(Stage, levels=c("Pregnancy","Postpartum"))
+  )
+
+#Data prep
+phy3 <- rel %>%
+  left_join(tax2, by="FeatureID") %>%
+  mutate(
+    Group = case_when(
+      tolower(Phylum) %in% tolower(c("Firmicutes","Bacillota")) ~ "Firmicutes",
+      tolower(Phylum) %in% tolower(c("Bacteroidota","Bacteroidetes")) ~ "Bacteroidota",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  group_by(SampleID, Group) %>%
+  summarise(RelAbund = sum(RelAbund), .groups="drop") %>%
+  left_join(meta2, by="SampleID") %>%
+  filter(!is.na(PregnancyDay)) %>%
+  group_by(SampleID) %>%
+  mutate(RelAbund = RelAbund / sum(RelAbund)) %>%
+  ungroup()
+
+#Order samples
+day_map <- phy3 %>% distinct(SampleID, PregnancyDay, Stage) %>% arrange(PregnancyDay)
+sample_order <- day_map$SampleID
+phy3 <- phy3 %>% mutate(SampleID = factor(SampleID, levels=sample_order))
+
+x_labels <- day_map$PregnancyDay
+names(x_labels) <- as.character(day_map$SampleID)
+
+phy3$Group <- factor(phy3$Group, levels=c("Bacteroidota","Firmicutes","Other"))
+
+#Birth Position
+birth_pos <- {
+  idx_preg_last  <- which.max(ifelse(day_map$Stage=="Pregnancy", day_map$PregnancyDay, -Inf))
+  idx_post_first <- which.min(ifelse(day_map$Stage=="Postpartum", day_map$PregnancyDay,  Inf))
+  if (is.finite(idx_preg_last) && is.finite(idx_post_first)) {
+    (idx_preg_last + idx_post_first) / 2
+  } else {
+    NA_real_
+  }
+}
+
+#Clean theme
+clean_theme <- theme_classic(base_size = 16) +
+  theme(
+    text = element_text(color="black"),
+    axis.text = element_text(color="black", size=14),
+    axis.title = element_text(color="black", size=16),
+    legend.text = element_text(color="black", size=14),
+    legend.title = element_text(color="black", size=15),
+    plot.title = element_text(face="bold", size=18, color="black"),
+    axis.text.x = element_text(angle=90, vjust=0.5, hjust=1),
+    panel.grid = element_blank()
+  )
+
+#Panel A
+pA <- ggplot(phy3, aes(x=SampleID, y=RelAbund, fill=Group)) +
+  geom_col(width=0.95, color="black", linewidth=0.2) +
+  scale_y_continuous(labels=percent_format(accuracy=1), expand=c(0,0), limits=c(0,1)) +
+  scale_x_discrete(labels=x_labels) +
+  scale_fill_manual(values=c(
+    "Bacteroidota"=COL_BACT,
+    "Firmicutes"=COL_FIRM,
+    "Other"=COL_OTH
+  )) +
+  labs(
+    title="A)",
+    x="Pregnancy day",
+    y="Relative abundance",
+    fill="Phylum"
+  ) +
+  clean_theme
+
+if (is.finite(birth_pos)) {
+  pA <- pA +
+    geom_vline(xintercept=birth_pos, linetype="dashed", color="black", linewidth=0.6) +
+    annotate("text", x=birth_pos, y=1, label="Birth", vjust=-0.4, size=5, color="black")
+}
+
+#Panel B 
+phy2 <- phy3 %>%
+  filter(Group %in% c("Firmicutes","Bacteroidota")) %>%
+  group_by(SampleID) %>%
+  mutate(RelAbund = RelAbund / sum(RelAbund)) %>%
+  ungroup()
+
+phy2$Group <- factor(phy2$Group, levels=c("Bacteroidota","Firmicutes"))
+
+pB <- ggplot(phy2, aes(x=SampleID, y=RelAbund, fill=Group)) +
+  geom_col(width=0.95, color="black", linewidth=0.2) +
+  scale_y_continuous(labels=percent_format(accuracy=1), expand=c(0,0), limits=c(0,1)) +
+  scale_x_discrete(labels=x_labels) +
+  scale_fill_manual(values=c(
+    "Bacteroidota"=COL_BACT,
+    "Firmicutes"=COL_FIRM
+  )) +
+  labs(
+    title="B)",
+    x="Pregnancy day",
+    y="Relative abundance",
+    fill="Phylum"
+  ) +
+  clean_theme
+
+if (is.finite(birth_pos)) {
+  pB <- pB +
+    geom_vline(xintercept=birth_pos, linetype="dashed", color="black", linewidth=0.6) +
+    annotate("text", x=birth_pos, y=1, label="Birth", vjust=-0.4, size=5, color="black")
+}
+
+#Save
+ggsave(paste0(out_prefix, "_A.png"), pA, width=11, height=5.5, dpi=600, bg="white")
+ggsave(paste0(out_prefix, "_B.png"), pB, width=11, height=5.5, dpi=600, bg="white")
+
+RSCRIPT
+
+OUTDIR="sandra_preg_vs_postpartum"
+
+Rscript "$OUTDIR/H3_stackedbars_clean_with_birth.R" \
+  "$OUTDIR/relfreq_export/feature-table.biom" \
+  "$OUTDIR/tax_export/taxonomy.tsv" \
+  "$OUTDIR/metadata_sandra_preg_post.tsv" \
+  "$OUTDIR/H3_Sandra_FirmBact"
