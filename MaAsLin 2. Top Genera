@@ -1,0 +1,256 @@
+library(tidyverse)
+library(Maaslin2)
+
+#Read metadata
+meta <- read.delim(
+  "AgeSexClass_metadata.txt",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+meta$Orangutan[meta$Orangutan == "UML29APR24"] <- "Dude"
+
+meta <- meta %>%
+  mutate(
+    AgeSexClass = trimws(AgeSexClass),
+    Orangutan   = trimws(Orangutan),
+    Family      = trimws(Family)
+  ) %>%
+  filter(AgeSexClass %in% c("Adult Female", "Flanged Male", "Juvenile Male", "Unflanged Male"))
+
+meta$AgeSexClass <- factor(
+  meta$AgeSexClass,
+  levels = c("Adult Female", "Flanged Male", "Juvenile Male", "Unflanged Male")
+)
+
+#Read genus table
+genus_tab <- read.delim(
+  "genus_table.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE,
+  skip = 1
+)
+
+colnames(genus_tab)[1] <- "Taxonomy"
+
+genus_tab$OriginalTaxonomy <- genus_tab$Taxonomy
+genus_tab$Genus <- gsub(".*g__", "", genus_tab$Taxonomy)
+genus_tab$Genus[genus_tab$Genus == genus_tab$Taxonomy] <- "Unassigned"
+genus_tab$Genus[is.na(genus_tab$Genus) | genus_tab$Genus == ""] <- "Unassigned"
+
+drop_patterns <- c("Mitochondria", "Chloroplast", "Eukaryota")
+genus_tab <- genus_tab[!grepl(
+  paste(drop_patterns, collapse = "|"),
+  genus_tab$OriginalTaxonomy,
+  ignore.case = TRUE
+), ]
+
+genus_tab <- genus_tab[!grepl("^Unassigned$", genus_tab$Genus, ignore.case = TRUE), ]
+genus_tab <- genus_tab[!grepl("^uncultured", genus_tab$Genus, ignore.case = TRUE), ]
+
+#Collapse duplicate genera
+count_df <- genus_tab %>%
+  select(-Taxonomy, -OriginalTaxonomy) %>%
+  relocate(Genus) %>%
+  group_by(Genus) %>%
+  summarise(across(everything(), ~ sum(as.numeric(.x), na.rm = TRUE)), .groups = "drop")
+
+#rows = samples, cols = genera
+count_mat <- as.data.frame(count_df)
+rownames(count_mat) <- count_mat$Genus
+count_mat$Genus <- NULL
+
+count_mat <- as.data.frame(t(count_mat))
+count_mat$SampleID <- rownames(count_mat)
+rownames(count_mat) <- NULL
+
+#Match metadata and feature table
+common_samples <- intersect(count_mat$SampleID, meta$`#SampleID`)
+
+features <- count_mat %>%
+  filter(SampleID %in% common_samples)
+
+meta_sub <- meta %>%
+  filter(`#SampleID` %in% common_samples)
+
+#Reorder table to match metadata
+features <- features[match(meta_sub$`#SampleID`, features$SampleID), ]
+
+#Set rownames and remove sample column
+rownames(features) <- features$SampleID
+features$SampleID <- NULL
+
+rownames(meta_sub) <- meta_sub$`#SampleID`
+
+#Check
+stopifnot(all(rownames(features) == rownames(meta_sub)))
+
+#Convert columns to numbers
+features[] <- lapply(features, as.numeric)
+
+#Keep genera present in at least 5% of samples
+prev <- colSums(features > 0) / nrow(features)
+features <- features[, prev >= 0.05, drop = FALSE]
+
+cat("Samples:", nrow(features), "\n")
+cat("Genera:", ncol(features), "\n")
+
+#Run Maaslin2
+fit_data <- Maaslin2(
+  input_data = features,
+  input_metadata = meta_sub,
+  output = "maaslin2_agesex_output_norandom",
+  fixed_effects = c("AgeSexClass"),
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  correction = "BH",
+  standardize = FALSE,
+  plot_heatmap = TRUE,
+  plot_scatter = FALSE
+)
+
+#Read results
+results <- read.delim(
+  "maaslin2_agesex_output_norandom/all_results.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+cat("\nColumn names in results:\n")
+print(colnames(results))
+
+sig_results <- results %>%
+  filter(qval < 0.05) %>%
+  arrange(qval)
+
+cat("\nNumber of significant results:", nrow(sig_results), "\n")
+print(sig_results)
+
+write.table(
+  sig_results,
+  "maaslin2_agesex_significant.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+#Plot Age/sec class
+top_taxa <- results %>%
+  arrange(qval) %>%
+  slice(1:20) %>%
+  mutate(feature = factor(feature, levels = rev(feature)))
+
+p <- ggplot(top_taxa, aes(x = coef, y = feature)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(size = 3) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Genera associated with Age/Sex Class",
+    x = "Model coefficient",
+    y = "Genus"
+  )
+
+p
+
+ggsave(
+  "maaslin2_agesex_coefficients.png",
+  p,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
+#Make sure orangutan is a factor
+meta_sub$Orangutan <- factor(meta_sub$Orangutan)
+
+# Run Maaslin2 by individual
+fit_orangutan <- Maaslin2(
+  input_data = features,
+  input_metadata = meta_sub,
+  output = "maaslin2_orangutan_output",
+  fixed_effects = c("Orangutan"),
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  correction = "BH",
+  standardize = FALSE,
+  plot_heatmap = TRUE,
+  plot_scatter = FALSE
+)
+
+#Read results
+orang_results <- read.delim(
+  "maaslin2_orangutan_output/all_results.tsv",
+  sep = "\t",
+  header = TRUE,
+  check.names = FALSE
+)
+
+#Significant results
+orang_sig <- orang_results %>%
+  filter(qval < 0.05) %>%
+  arrange(qval)
+
+cat("Number of significant orangutan-level associations:", nrow(orang_sig), "\n")
+print(orang_sig)
+
+write.table(
+  orang_sig,
+  "maaslin2_orangutan_significant.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+library(tidyverse)
+library(ggplot2)
+
+top_orang <- orang_results %>%
+  group_by(value) %>%
+  slice_min(order_by = qval, n = 4, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    feature_label = paste(feature, value, sep = " | "),
+    feature_label = factor(feature_label, levels = rev(unique(feature_label)))
+  )
+
+p_orang <- ggplot(
+  top_orang,
+  aes(x = coef, y = feature_label, color = value)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_point(size = 3) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Top genera associated with individual orangutans",
+    x = "Model coefficient",
+    y = "Genus | orangutan",
+    color = "Orangutan"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    axis.text.y = element_text(face = "italic")
+  )
+
+p_orang
+
+ggsave(
+  "maaslin2_orangutan_top_per_individual.png",
+  p_orang,
+  width = 11,
+  height = 9,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  "maaslin2_orangutan_top_per_individual.pdf",
+  p_orang,
+  width = 11,
+  height = 9
+)
