@@ -1,0 +1,306 @@
+#Libraries
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(purrr)
+  library(tibble)
+  library(ggplot2)
+  library(qiime2R)
+  library(vegan)
+})
+
+#1Inputs
+xlsx_file <- "PositiveControls.xlsx"   
+sheet_name <- 1                       
+root_dir <- "/projectnb/pongogp/zealbert" 
+
+#Expected genus composition (from company website)
+expected <- tibble::tribble(
+  ~Genus,                 ~Expected,
+  "Listeria",              0.12,
+  "Pseudomonas",           0.12,
+  "Bacillus",              0.12,
+  "Escherichia-Shigella",  0.12,
+  "Salmonella",            0.12,
+  "Lactobacillus",         0.12,
+  "Enterococcus",          0.12,
+  "Staphylococcus",        0.12,
+  "Saccharomyces",         0.02,
+  "Cryptococcus",          0.02
+)
+
+#Plot aesthetics
+expected_line <- 0.12
+base_font_size <- 11
+xaxis_text_size <- 9  
+
+#Read metadata
+meta <- readxl::read_excel(xlsx_file, sheet = sheet_name)
+
+#Clean column names: remove trailing spaces
+names(meta) <- str_replace_all(names(meta), "\\s+$", "")
+
+#Require columns present in your sheet
+
+meta <- meta %>%
+  mutate(
+    Outer_num = as.integer(Outer),
+    Inner_num = as.integer(Inner),
+    Outer = sprintf("%02d", Outer_num),
+    Internal = sprintf("%02d", Inner_num),
+    ControlID = paste0("ext", Outer, "_int", Internal),
+    ControlType = `PCR or Extraction`,
+    Path = as.character(Path)
+  ) %>%
+  select(ControlID, Outer, Internal, ControlType, Path)
+
+#Level7 collapsed tables
+all_level7 <- list.files(
+  root_dir,
+  recursive = TRUE,
+  full.names = TRUE,
+  pattern = "table-collapsed-(refseq|absfreq|relfreq)-level7\\.qza$"
+)
+
+if (length(all_level7) == 0) {
+  stop("No level7 collapsed tables found under root_dir. Check root_dir.")
+}
+
+pick_best <- function(paths) {
+  if (length(paths) == 0) return(NA_character_)
+  pref <- c("refseq", "absfreq", "relfreq")
+  for (p in pref) {
+    hit <- paths[str_detect(paths, paste0("table-collapsed-", p, "-level7\\.qza$"))]
+    if (length(hit) > 0) return(hit[1])
+  }
+  return(paths[1])
+}
+
+#Match by ControlID pattern: "barcode_externalXX_internalYY" appears in paths
+qza_tbl <- meta %>%
+  rowwise() %>%
+  mutate(
+    matches = list(all_level7[
+      str_detect(all_level7, paste0("barcode_external", Outer, "_internal", Internal))
+    ]),
+    FullPath = pick_best(unlist(matches))
+  ) %>%
+  ungroup() %>%
+  select(ControlID, Outer, Internal, ControlType, FullPath)
+
+#Check
+cat("\nFound paths for", sum(!is.na(qza_tbl$FullPath)), "of", nrow(qza_tbl), "rows\n")
+if (any(is.na(qza_tbl$FullPath))) {
+  cat("\nFirst missing rows:\n")
+  print(qza_tbl %>% filter(is.na(FullPath)) %>% head(10))
+}
+
+#Keep only those with actual paths
+qza_tbl <- qza_tbl %>% filter(!is.na(FullPath))
+
+#Read QZA
+qza_to_long <- function(fp) {
+  q <- qiime2R::read_qza(fp)
+
+  mat <- as.matrix(q$data)
+
+  df <- as.data.frame(mat, check.names = FALSE)
+  df <- tibble::rownames_to_column(df, "Genus")
+
+  #pivot to long
+  df_long <- df %>%
+    tidyr::pivot_longer(
+      cols = -Genus,
+      names_to = "SampleID",
+      values_to = "Reads"
+    ) %>%
+    mutate(
+      Reads = suppressWarnings(as.numeric(Reads))
+    ) %>%
+    filter(!is.na(Reads), Reads > 0)
+
+  df_long
+}
+
+summarise_genus <- function(df_long) {
+
+  df_long %>%
+    group_by(SampleID, Genus) %>%
+    summarise(Reads = sum(Reads), .groups = "drop") %>%
+    group_by(SampleID) %>%
+    mutate(RelAbund = Reads / sum(Reads)) %>%
+    ungroup()
+}
+
+safe_one <- purrr::safely(function(fp) summarise_genus(qza_to_long(fp)))
+
+pos_results_long <- qza_tbl %>%
+  mutate(
+    res = purrr::map(FullPath, safe_one),
+    genus_tbl = purrr::map(res, "result"),
+    error = purrr::map_chr(res, ~ if (is.null(.x$error)) NA_character_ else as.character(.x$error))
+  ) %>%
+  select(-res) %>%
+  tidyr::unnest(genus_tbl)
+
+#Save
+write.csv(pos_results_long, "positive_controls_genus_long.csv", row.names = FALSE)
+
+#Genus levels for plotting
+pos_results_long <- pos_results_long %>%
+  mutate(
+    GenusPlot = if_else(Genus == "Escherichia-Shigella", "E-Shigella", Genus)
+  )
+
+expected <- expected %>%
+  mutate(
+    GenusPlot = if_else(Genus == "Escherichia-Shigella", "E-Shigella", Genus)
+  )
+
+#Make plot
+plot_df_all <- pos_results_long %>%
+  filter(GenusPlot %in% expected$GenusPlot) %>%
+  left_join(expected %>% select(GenusPlot, Expected), by = "GenusPlot")
+
+genus_order <- plot_df_all %>%
+  group_by(GenusPlot) %>%
+  summarise(med = median(RelAbund, na.rm = TRUE), .groups = "drop") %>%
+  arrange(med) %>%
+  pull(GenusPlot)
+
+plot_df_all <- plot_df_all %>%
+  mutate(GenusPlot = factor(GenusPlot, levels = genus_order))
+
+#Split PCR vs Extraction positives
+plot_df_pcr <- plot_df_all %>% filter(ControlType == "PCR")
+plot_df_ext <- plot_df_all %>% filter(ControlType == "Extraction")
+
+#Plot
+make_boxplot <- function(df, title, outfile_pdf) {
+  pdf(outfile_pdf, width = 10, height = 6)
+  p <- ggplot(df, aes(x = RelAbund, y = GenusPlot)) +
+    geom_boxplot(outlier.size = 0.5) +
+    geom_vline(xintercept = expected_line, linetype = "dashed", color = "red") +
+    labs(
+      x = "Observed Relative Abundance",
+      y = "Genus",
+      title = title
+    ) +
+    theme_bw(base_size = base_font_size) +
+    theme(
+      axis.text.y = element_text(size = xaxis_text_size)  # smaller genus text
+    )
+  print(p)
+  dev.off()
+}
+
+make_boxplot(plot_df_all, "All Positive Controls (10 expected genera)", "positive_controls_all_10genera.pdf")
+make_boxplot(plot_df_pcr, "PCR Positive Controls (10 expected genera)", "positive_controls_PCR_only.pdf")
+make_boxplot(plot_df_ext, "Extraction Positive Controls (10 expected genera)", "positive_controls_Extraction_only.pdf")
+
+#Reads per control
+reads_per_control <- pos_results_long %>%
+  group_by(ControlID, ControlType) %>%
+  summarise(TotalReads = sum(Reads), .groups = "drop") %>%
+  arrange(desc(TotalReads))
+
+write.csv(reads_per_control, "positive_controls_total_reads.csv", row.names = FALSE)
+
+#Top 10 genera per control
+top10_per_control <- pos_results_long %>%
+  group_by(ControlID, ControlType, Genus) %>%
+  summarise(Reads = sum(Reads), .groups = "drop") %>%
+  group_by(ControlID, ControlType) %>%
+  mutate(RelAbund = Reads / sum(Reads)) %>%
+  slice_max(order_by = RelAbund, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+write.csv(top10_per_control, "positive_controls_top10_genera.csv", row.names = FALSE)
+
+#Shannon diversity per control
+shannon_df <- pos_results_long %>%
+  group_by(ControlID, ControlType, Genus) %>%
+  summarise(Reads = sum(Reads), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from = Genus,
+    values_from = Reads,
+    values_fill = 0
+  )
+
+shannon_matrix <- shannon_df %>%
+  select(-ControlID, -ControlType)
+
+shannon_df$Shannon <- vegan::diversity(shannon_matrix, index = "shannon")
+
+shannon_results <- shannon_df %>%
+  select(ControlID, ControlType, Shannon) %>%
+  arrange(ControlType, ControlID)
+
+#Save as CSV
+write.csv(shannon_results, "Table_S1_Shannon_all_controls.csv", row.names = FALSE)
+
+#Split PCR/Extraction tables
+shannon_pcr <- shannon_results %>% filter(ControlType == "PCR") %>% arrange(ControlID)
+shannon_ext <- shannon_results %>% filter(ControlType == "Extraction") %>% arrange(ControlID)
+
+write.csv(shannon_pcr, "Table_S1_Shannon_PCR_controls.csv", row.names = FALSE)
+write.csv(shannon_ext, "Table_S1_Shannon_Extraction_controls.csv", row.names = FALSE)
+
+#Make the Shannon tables as PDF
+save_table_pdf <- function(df, title, outfile_pdf) {
+  pdf(outfile_pdf, width = 8.5, height = 11)
+  par(mar = c(1, 1, 3, 1))
+  plot.new()
+  title(main = title, cex.main = 1.2)
+
+  #Format
+  df_print <- df %>%
+    mutate(Shannon = sprintf("%.3f", Shannon))
+
+  #Split into pages if large
+  n <- nrow(df_print)
+  rows_per_page <- 45
+  n_pages <- ceiling(n / rows_per_page)
+
+  for (pg in seq_len(n_pages)) {
+    if (pg > 1) {
+      plot.new()
+      title(main = paste0(title, " (cont.)"), cex.main = 1.2)
+    }
+    idx_start <- (pg - 1) * rows_per_page + 1
+    idx_end <- min(pg * rows_per_page, n)
+    chunk <- df_print[idx_start:idx_end, , drop = FALSE]
+
+    #Draw the table
+    grid::grid.newpage()
+    grid::grid.text(title, y = 0.97, gp = grid::gpar(fontsize = 14, fontface = "bold"))
+    tbl <- gridExtra::tableGrob(chunk, rows = NULL, theme = gridExtra::ttheme_minimal(base_size = 10))
+    grid::grid.draw(tbl)
+  }
+
+  dev.off()
+}
+
+#gridExtra is used for table rendering; install if missing
+if (!requireNamespace("gridExtra", quietly = TRUE)) {
+  install.packages("gridExtra", repos = "https://cloud.r-project.org")
+}
+library(gridExtra)
+library(grid)
+
+save_table_pdf(shannon_pcr, "Table S1. Shannon diversity (PCR positive controls)", "Table_S1_Shannon_PCR_controls.pdf")
+save_table_pdf(shannon_ext, "Table S1. Shannon diversity (Extraction positive controls)", "Table_S1_Shannon_Extraction_controls.pdf")
+
+cat("\nDONE.\nFiles written:\n",
+    "- positive_controls_genus_long.csv\n",
+    "- positive_controls_total_reads.csv\n",
+    "- positive_controls_top10_genera.csv\n",
+    "- positive_controls_all_10genera.pdf\n",
+    "- positive_controls_PCR_only.pdf\n",
+    "- positive_controls_Extraction_only.pdf\n",
+    "- Table_S1_Shannon_all_controls.csv\n",
+    "- Table_S1_Shannon_PCR_controls.csv + PDF\n",
+    "- Table_S1_Shannon_Extraction_controls.csv + PDF\n"
+)
