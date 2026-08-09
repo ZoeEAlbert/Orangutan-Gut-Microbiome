@@ -1,0 +1,54 @@
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+#Load data
+infile <- "/projectnb/pongogp/zealbert/Thermocycler_comparison_metadata.csv"
+data <- read_csv(infile)
+
+#Clean and build grouping variable (PCR1,PCR2)
+data2 <- data %>%
+  select(`Sample ID`, SDI, pcr_1, pcr_2) %>%                 
+  filter(!is.na(SDI), !is.na(pcr_1), !is.na(pcr_2)) %>%     
+  mutate(
+    group = paste0(pcr_1, ",", pcr_2),
+    group = factor(group, levels = c("8,8", "8,16", "16,8", "16,16"))
+  )
+
+#Check
+print(colnames(data2))
+print(head(data2))
+print(data2 %>% count(group))
+print(data2 %>% arrange(desc(SDI)) %>% head())
+
+print(
+  data2 %>%
+    group_by(group) %>%
+    summarise(
+      n = n(),
+      min_SDI = min(SDI),
+      median_SDI = median(SDI),
+      max_SDI = max(SDI),
+      .groups = "drop"
+    )
+)
+
+#Plot
+p <- ggplot(data2, aes(x = group, y = SDI)) +
+  geom_boxplot(width = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.12, height = 0, alpha = 0.7, size = 2) +
+  stat_summary(fun = mean, geom = "point", size = 3, shape = 18) +
+  theme_bw() +
+  labs(
+    x = "Thermocycler combination (PCR1, PCR2)",
+    y = "Shannon diversity"
+  )
+
+print(p)
+
+#Save
+ggsave("plot_SDI_boxplot.png", p, width = 6, height = 4, dpi = 300)
+
+#Kruskal–Wallis test
+kw <- kruskal.test(SDI ~ group, data = data2)
+print(kw)
