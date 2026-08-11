@@ -1,5 +1,6 @@
 ##########################################
 #Genus-level Shannon diversity by preservation buffer
+#Result will be spaghetti plot with triplicate samples in different colors connected via a line.
 ##########################################
 suppressPackageStartupMessages({
   library(readr)
