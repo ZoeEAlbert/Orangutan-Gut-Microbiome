@@ -1,4 +1,5 @@
 #Prior to all analysis, samples needed to be demultiplexed using guppy 
+#This can be done on the computer desktop
 ```{bash}
 DATADIR=/Users/smagl/Desktop/ZoeAlbert/data_all
 ```
