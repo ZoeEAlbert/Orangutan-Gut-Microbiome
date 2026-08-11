@@ -1,4 +1,5 @@
 #Prior to all bioinformatic analysis, samples needed to be separated into taxa with the program MetONTIIME.
+#This is done after guppy.
 #!/bin/bash -l
 
 #$ -P pongogp
