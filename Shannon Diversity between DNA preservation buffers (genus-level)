@@ -1,6 +1,7 @@
 ############################################################################
 #This was done to evaluate the differences bwtween three DNA preservation buffers: EtOH, RNAlater, and Zymo DNA RNA Shield.
 #Buffers were paired.
+#Output will be three boxplots on one graph.
 ############################################################################
 #Load Packages
 SuppressPackageStartupMessages({
